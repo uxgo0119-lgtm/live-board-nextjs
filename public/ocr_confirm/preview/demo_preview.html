@@ -1,0 +1,158 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<title>原紙プレビュー — 簡易デモ(Phase6)</title>
+<style>
+  body { font-family: -apple-system, "Hiragino Kaku Gothic ProN", sans-serif; margin: 0; padding: 24px; background: #f4f5f7; color: #222; }
+  .dev-banner { background: #fff3cd; border: 1px solid #e0a800; color: #6b5300; padding: 10px 14px; border-radius: 6px; margin-bottom: 16px; font-size: 14px; }
+  h1 { font-size: 18px; margin: 0 0 4px; }
+  .sub { color: #666; font-size: 13px; margin-bottom: 20px; }
+  .panel { background: #fff; border: 1px solid #ddd; border-radius: 8px; padding: 16px; margin-bottom: 16px; }
+  button { background: #2f6fed; color: #fff; border: none; padding: 8px 16px; border-radius: 6px; font-size: 14px; cursor: pointer; margin-right: 8px; }
+  button:hover { opacity: 0.9; }
+  select { padding: 6px; margin-right: 8px; }
+
+  /* ---- 原紙プレビュー本体のスタイル(html_canvas_preview_renderer.jsが生成するDOM用) ---- */
+  .ffp-preview-banner { background: #fdecea; border: 1px solid #d9534f; color: #7a1f16; padding: 10px 14px; border-radius: 6px; margin-bottom: 12px; font-size: 13px; font-weight: bold; }
+  .ffp-preview-meta { color: #555; font-size: 13px; margin-bottom: 16px; }
+  .ffp-preview-sheet { margin-bottom: 20px; }
+  .ffp-sheet-title { font-size: 15px; margin: 0 0 8px; border-bottom: 2px solid #333; padding-bottom: 4px; }
+  .ffp-room-grid { display: flex; flex-wrap: wrap; gap: 10px; }
+  .ffp-preview-room { border: 1px solid #999; border-radius: 6px; padding: 8px 10px; min-width: 110px; background: #fff; position: relative; }
+  .ffp-room-number { font-weight: bold; font-size: 13px; }
+  .ffp-room-text { font-size: 16px; font-weight: bold; margin-top: 4px; }
+  .ffp-room-cellref { font-size: 10px; color: #888; margin-top: 4px; }
+  .ffp-room-warn-badge { color: #b00020; margin-left: 4px; }
+  .ffp-empty-state { color: #888; font-style: italic; }
+  .ffp-preview-warnings { margin-top: 16px; background: #fff8ec; border: 1px solid #e0a800; border-radius: 6px; padding: 10px 12px; }
+  .ffp-warn-line { color: #a66a00; font-size: 13px; margin-bottom: 4px; }
+  .ffp-warn-unmapped { color: #b00020; font-weight: bold; }
+</style>
+</head>
+<body>
+
+<div class="dev-banner">
+  ⚠ これは開発確認用の簡易デモ(Phase6の動作確認用)です。原紙プレビュー本体(下記の枠内)とは
+  別に、この黄色い帯自体は「このデモ画面自体が簡易デモであること」を示すものです。本番の
+  Live Board画面(lb_tool/index.html)にはまだ組み込まれていません。
+</div>
+
+<h1>原紙プレビュー — 簡易デモ</h1>
+<div class="sub">templates/物件A のサンプルデータ(mapping.json/rules.json/manifest.json)+ サンプルFSDFを使って、preview_adapter.js → HtmlCanvasPreviewRenderer の一連の流れを確認できます。</div>
+
+<div class="panel">
+  <label>シナリオ: </label>
+  <select id="scenarioSelect">
+    <option value="normal" selected>通常(2日工程・3部屋、色分けあり)</option>
+    <option value="singleDay">1日工程(工程色が付かないことの確認)</option>
+    <option value="withUnmapped">未マッピング部屋を含む(警告表示の確認)</option>
+    <option value="propertyMismatch">物件ID不一致(警告表示の確認)</option>
+  </select>
+  <button id="renderBtn">プレビュー表示</button>
+</div>
+
+<div class="panel">
+  <div id="previewContainer"></div>
+</div>
+
+<div class="panel">
+  <div class="sub" style="margin-bottom:6px;">生成されたPreviewOutput(JSON。開発者確認用)</div>
+  <pre id="previewJson" style="background:#1e1e1e;color:#d4d4d4;padding:12px;border-radius:6px;overflow:auto;max-height:300px;font-size:12px;">(まだ生成していません)</pre>
+</div>
+
+<!-- 依存モジュールを読み込み順に従って読み込む(window.FireFlowTemplateEngine / window.FireFlowOcrConfirm 名前空間経由) -->
+<!-- FSDF Ver2.0(Envelope化)対応: preview_adapter.jsのbuildPreviewOutput()がunwrapEnvelope()を
+     呼ぶため、window.FireFlowFsdf名前空間にdocumentTypes.js/envelopeAdapter.jsが先に読み込まれて
+     いる必要がある。 -->
+<script src="../../../fireflow_fsdf/schema/documentTypes.js"></script>
+<script src="../../../fireflow_fsdf/convert/envelopeAdapter.js"></script>
+<script src="../../../fireflow_template_engine/rules_resolver.js"></script>
+<script src="../../../fireflow_template_engine/preview_adapter.js"></script>
+<script src="./html_canvas_preview_renderer.js"></script>
+
+<script>
+(function () {
+  // templates/物件A のmapping.json/rules.json/manifest.jsonの内容をそのまま埋め込む
+  // (file://プロトコルでのfetch/XHRはCORS制約で失敗しうるため、Phase2のdemo_intake.htmlと同様、
+  // デモ用に静的データをJS内へ直接埋め込む方式を採る。本番運用時は実ファイルを読み込む想定)。
+  var mappingJson = {
+    propertyId: '物件A',
+    sheet: '点検予定表',
+    roomCellMap: {
+      '1512': { cell: 'C15', sheet: '3F' },
+      '1513': { cell: 'C16', sheet: '3F' },
+      '2101': { cell: 'C5', sheet: '4F' },
+    },
+    fields: {
+      roomNumberCell: '見出しは印刷済みのため書き込み不要(rulesで色のみ変更)',
+      symbolAnchor: 'left-bottom',
+      dayColorAnchor: 'room-frame',
+    },
+  };
+
+  var rulesJson = {
+    amPmColor: { A: '#FF0000', P: '#0000FF' },
+    statusColor: { pass: '#000000', cancelled: '#000000', absent: '#000000' },
+    scheduleDayColor: {
+      singleDay: null,
+      multiDay: { 1: '#FFC0CB', 2: '#90EE90', 3: '#FFA500', 4: '#800080' },
+    },
+    scheduleDayAppliesTo: 'roomNumberFrameOnly',
+    timePreferenceLabelPosition: 'bottom-left',
+  };
+
+  var manifestJson = {
+    templateId: 'prop-a-v1',
+    propertyId: '物件A',
+    version: '1.0',
+    active: true,
+    generatedBy: 'manual',
+    updatedAt: '2026-07-27T00:00:00+09:00',
+  };
+
+  function buildFsdf(scenario) {
+    var propertyId = scenario === 'propertyMismatch' ? '物件Z' : '物件A';
+    var totalScheduleDays = scenario === 'singleDay' ? 1 : 2;
+    var rooms = [
+      { roomNumber: '1512', scheduleDay: 1, timePreference: { period: 'AM', time: '10:00', isRange: false, timeEnd: null } },
+      { roomNumber: '1513', scheduleDay: 2, sourceStatus: 'pass' },
+      { roomNumber: '2101', scheduleDay: 2, timePreference: { period: 'PM', time: '13:00', isRange: false, timeEnd: null } },
+    ];
+    if (scenario === 'withUnmapped') {
+      rooms.push({ roomNumber: '9999', scheduleDay: 1, timePreference: { period: 'PM', time: '15:00' } });
+    }
+    return {
+      fsdfVersion: '1.2',
+      property: { id: propertyId, name: 'コスモ六甲ガーデンフォート' },
+      inspection: { date: '2026-07-27', totalScheduleDays: totalScheduleDays },
+      rooms: rooms,
+    };
+  }
+
+  var HtmlCanvasPreviewRenderer = window.FireFlowOcrConfirm.HtmlCanvasPreviewRenderer;
+
+  document.getElementById('renderBtn').addEventListener('click', function () {
+    var scenario = document.getElementById('scenarioSelect').value;
+    var fsdf = buildFsdf(scenario);
+    var container = document.getElementById('previewContainer');
+    try {
+      var previewOutput = HtmlCanvasPreviewRenderer.renderAndMount(container, {
+        fsdf: fsdf,
+        mappingJson: mappingJson,
+        rulesJson: rulesJson,
+        manifestJson: manifestJson,
+      });
+      document.getElementById('previewJson').textContent = JSON.stringify(previewOutput, null, 2);
+    } catch (e) {
+      alert('エラー: ' + e.message);
+    }
+  });
+
+  // 初期表示
+  document.getElementById('renderBtn').click();
+})();
+</script>
+
+</body>
+</html>

@@ -1,0 +1,28 @@
+# dependencies
+/node_modules
+
+# Next.js build output
+/.next/
+/out/
+
+# env files (実際の秘密情報が入るため、絶対にコミットしない)
+.env
+.env.local
+.env.*.local
+
+# logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# OS
+.DS_Store
+
+# TypeScript
+*.tsbuildinfo
+next-env.d.ts
+
+# [2026-08-05追加] 捺印表OCR Anthropic／Gemini比較検証CLI(npm run ocr:compare)の出力先。
+# 比較レポートには捺印表の読み取り結果(部屋番号・時刻等)が含まれるため、誤ってコミット
+# されないようにする(氏名はレポート上デフォルトで伏字化されるが、それでも念のため)。
+/ocr-compare-reports/

@@ -1,0 +1,310 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<title>物件への参加 — FireFlow Live Board</title>
+<style>
+  :root { --blue: #3b6ef6; --green: #2a8a4a; --red: #d64545; --text-hi: #1B2333; --text-mid: #6B7280; --border: #E5E7EB; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Hiragino Sans", "Yu Gothic", sans-serif;
+    background: #F4F5F7; color: var(--text-hi); min-height: 100vh;
+    display: flex; align-items: center; justify-content: center; padding: 20px;
+  }
+  .card {
+    width: min(420px, 100%); background: #fff; border-radius: 16px; padding: 28px 24px;
+    box-shadow: 0 10px 40px rgba(0,0,0,0.10);
+  }
+  .brand { display: flex; align-items: center; gap: 8px; margin-bottom: 22px; }
+  .brand-badge {
+    width: 32px; height: 32px; border-radius: 8px; background: var(--blue); color: #fff;
+    display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 13px; flex-shrink: 0;
+  }
+  .brand-name { font-weight: 800; font-size: 17px; }
+  h1 { font-size: 19px; margin: 0 0 6px; }
+  .sub { font-size: 13px; color: var(--text-mid); margin: 0 0 18px; line-height: 1.6; }
+  .info-row { display: flex; justify-content: space-between; gap: 12px; padding: 9px 0; border-bottom: 1px solid var(--border); font-size: 14px; }
+  .info-row:last-of-type { border-bottom: none; margin-bottom: 16px; }
+  .info-label { color: var(--text-mid); flex-shrink: 0; }
+  .info-value { font-weight: 700; text-align: right; }
+  label { display: block; font-size: 13px; color: #555; margin: 14px 0 6px; }
+  input[type=email], input[type=password], input[type=text] {
+    width: 100%; box-sizing: border-box; padding: 11px 12px; border: 1px solid #ddd; border-radius: 8px; font-size: 16px;
+  }
+  button.primary-btn {
+    width: 100%; padding: 14px; border: none; border-radius: 10px; background: var(--blue); color: #fff;
+    font-weight: 700; font-size: 16px; margin-top: 16px; cursor: pointer;
+  }
+  button.primary-btn:active { background: #2f5bd0; }
+  button.primary-btn:disabled { background: #C7CCD4; cursor: default; }
+  button.link-btn { background: none; border: none; color: var(--blue); font-size: 13px; cursor: pointer; }
+  .toggle-row { text-align: center; margin-top: 12px; }
+  .error-box { color: var(--red); font-size: 13px; margin-top: 12px; display: none; line-height: 1.6; }
+  .notice-box { color: var(--green); font-size: 13px; margin-top: 12px; display: none; line-height: 1.6; }
+  .loading { text-align: center; color: var(--text-mid); font-size: 14px; padding: 20px 0; }
+  .check-icon { font-size: 34px; text-align: center; margin-bottom: 6px; }
+  .status-block { margin-top: 4px; padding: 16px; border-radius: 12px; }
+  .status-block.confirmed { background: #F0FDF4; }
+  .status-title { font-weight: 800; font-size: 15px; margin-bottom: 4px; }
+  .status-title.confirmed { color: var(--green); }
+  .status-desc { font-size: 13px; color: var(--text-mid); line-height: 1.6; }
+  a.open-btn {
+    display: block; text-align: center; width: 100%; padding: 14px; border-radius: 10px; background: var(--blue);
+    color: #fff; font-weight: 700; font-size: 16px; margin-top: 16px; text-decoration: none;
+  }
+  .session-row { display: flex; justify-content: space-between; align-items: center; font-size: 13px; color: var(--text-mid); margin-bottom: 4px; }
+</style>
+</head>
+<body>
+  <div class="card">
+    <div class="brand"><div class="brand-badge">LB</div><div class="brand-name">Live Board</div></div>
+    <div id="loadingBlock" class="loading">読み込んでいます…</div>
+
+    <div id="mainBlock" style="display:none;">
+      <h1>物件への参加</h1>
+      <p class="sub">この招待リンクから、下記の物件のLive Boardに参加できます。</p>
+      <div class="info-row"><span class="info-label">物件名</span><span class="info-value" id="fPropertyName">—</span></div>
+      <div class="info-row"><span class="info-label">権限</span><span class="info-value" id="fRoleLabel">—</span></div>
+
+      <div id="sessionBlock" style="display:none;">
+        <div class="session-row"><span id="fLoggedInAs"></span><button type="button" class="link-btn" id="logoutBtn">別のアカウントでログインし直す</button></div>
+        <button type="button" class="primary-btn" id="joinBtnLoggedIn">この物件に参加する</button>
+      </div>
+
+      <div id="authBlock" style="display:none;">
+        <label for="authEmail">メールアドレス</label>
+        <input id="authEmail" type="email" autocomplete="username">
+        <label for="authPassword">パスワード</label>
+        <input id="authPassword" type="password" autocomplete="current-password">
+        <button type="button" class="primary-btn" id="authBtn">ログインして参加する</button>
+        <div class="toggle-row"><button type="button" class="link-btn" id="authToggle">アカウントをお持ちでない方はこちら（新規登録）</button></div>
+      </div>
+
+      <div id="joinedBlock" class="status-block confirmed" style="display:none;">
+        <div class="check-icon">✓</div>
+        <div class="status-title confirmed" id="joinedTitle">参加が完了しました</div>
+        <div class="status-desc" id="joinedDesc"></div>
+        <a class="open-btn" href="index.html">Live Boardを開く</a>
+      </div>
+
+      <div class="error-box" id="errorBox"></div>
+      <div class="notice-box" id="noticeBox"></div>
+    </div>
+
+    <div id="fatalErrorBlock" style="display:none;">
+      <div class="status-block" style="background:#FFF7ED;">
+        <div class="status-title">このリンクは開けませんでした</div>
+        <div class="status-desc" id="fatalErrorDesc"></div>
+      </div>
+    </div>
+  </div>
+
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
+<script>
+(function () {
+  'use strict';
+
+  // supabase-integration.js と同じ接続情報（別ページなので個別に保持している）。
+  var SUPABASE_URL = 'https://trtivspdgekofiglfyls.supabase.co';
+  var SUPABASE_ANON_KEY = 'sb_publishable_hMU5PaVb113q-5iPkuPyxA_Gvbm1zPm';
+
+  function qs(name) {
+    return new URLSearchParams(location.search).get(name);
+  }
+
+  var inviteId = qs('invite');
+  var sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
+  var loadingBlock = document.getElementById('loadingBlock');
+  var mainBlock = document.getElementById('mainBlock');
+  var fatalErrorBlock = document.getElementById('fatalErrorBlock');
+  var fatalErrorDesc = document.getElementById('fatalErrorDesc');
+  var errorBox = document.getElementById('errorBox');
+  var noticeBox = document.getElementById('noticeBox');
+  var sessionBlock = document.getElementById('sessionBlock');
+  var authBlock = document.getElementById('authBlock');
+  var joinedBlock = document.getElementById('joinedBlock');
+
+  var inviteInfo = null; // { propertyName, role, roleLabel, valid, reason }
+  var isSignup = false;
+
+  function showFatal(msg) {
+    loadingBlock.style.display = 'none';
+    mainBlock.style.display = 'none';
+    fatalErrorBlock.style.display = 'block';
+    fatalErrorDesc.textContent = msg;
+  }
+
+  function showError(msg) {
+    noticeBox.style.display = 'none';
+    errorBox.textContent = msg;
+    errorBox.style.display = 'block';
+  }
+
+  function showNotice(msg) {
+    errorBox.style.display = 'none';
+    noticeBox.textContent = msg;
+    noticeBox.style.display = 'block';
+  }
+
+  function clearMessages() {
+    errorBox.style.display = 'none';
+    noticeBox.style.display = 'none';
+  }
+
+  async function refreshAuthUI() {
+    var { data: { session } } = await sb.auth.getSession();
+    if (session && session.user) {
+      sessionBlock.style.display = 'block';
+      authBlock.style.display = 'none';
+      document.getElementById('fLoggedInAs').textContent = (session.user.email || '') + ' としてログイン中';
+    } else {
+      sessionBlock.style.display = 'none';
+      authBlock.style.display = 'block';
+    }
+  }
+
+  async function doJoin() {
+    var { data: { session } } = await sb.auth.getSession();
+    if (!session || !session.access_token) {
+      showError('ログイン状態が確認できませんでした。もう一度お試しください。');
+      return;
+    }
+    clearMessages();
+    try {
+      var res = await fetch('/api/accept-invite?id=' + encodeURIComponent(inviteId), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + session.access_token },
+        body: JSON.stringify({}),
+      });
+      var body = await res.json();
+      if (!res.ok) {
+        showError(body.error || '参加処理に失敗しました。もう一度お試しください。');
+        return;
+      }
+      mainBlock.querySelector('#fPropertyName') && null;
+      document.getElementById('sessionBlock').style.display = 'none';
+      document.getElementById('authBlock').style.display = 'none';
+      document.querySelectorAll('.info-row').forEach(function (el) { el.style.display = 'none'; });
+      document.querySelector('.sub').style.display = 'none';
+      joinedBlock.style.display = 'block';
+      var title = body.result.alreadyMember ? '既に参加済みです' : '参加が完了しました';
+      document.getElementById('joinedTitle').textContent = title;
+      document.getElementById('joinedDesc').textContent =
+        body.result.propertyName + ' に「' + (body.result.roleLabel || body.result.role) + '」として' +
+        (body.result.alreadyMember ? '既に参加しています。' : '参加しました。') + '下のボタンからLive Boardを開いてください。';
+    } catch (err) {
+      showError('通信に失敗しました。電波の良い場所でもう一度お試しください。');
+    }
+  }
+
+  document.getElementById('joinBtnLoggedIn').addEventListener('click', function () {
+    var btn = this;
+    btn.disabled = true;
+    btn.textContent = '参加しています…';
+    doJoin().finally(function () {
+      btn.disabled = false;
+      btn.textContent = 'この物件に参加する';
+    });
+  });
+
+  document.getElementById('logoutBtn').addEventListener('click', async function () {
+    await sb.auth.signOut();
+    await refreshAuthUI();
+  });
+
+  document.getElementById('authToggle').addEventListener('click', function () {
+    isSignup = !isSignup;
+    document.getElementById('authBtn').textContent = isSignup ? '新規登録して参加する' : 'ログインして参加する';
+    this.textContent = isSignup ? 'すでにアカウントをお持ちの方はこちら' : 'アカウントをお持ちでない方はこちら（新規登録）';
+  });
+
+  document.getElementById('authBtn').addEventListener('click', async function () {
+    var btn = this;
+    var email = document.getElementById('authEmail').value.trim();
+    var password = document.getElementById('authPassword').value;
+    clearMessages();
+    if (!email || !password) {
+      showError('メールアドレスとパスワードを入力してください。');
+      return;
+    }
+    btn.disabled = true;
+    btn.textContent = '処理しています…';
+    try {
+      var result = isSignup
+        ? await sb.auth.signUp({ email: email, password: password })
+        : await sb.auth.signInWithPassword({ email: email, password: password });
+      if (result.error) throw result.error;
+
+      if (isSignup && !result.data.session) {
+        // supabase-integration.js と同じ理由: メール確認ありプロジェクトでは、既に登録済みの
+        // メールアドレスに signUp() してもエラーにならず session:null が返る。
+        // identities が空配列なら「登録済みメールアドレスへの新規登録試行」と判定できる。
+        var identities = (result.data.user && result.data.user.identities) || [];
+        if (identities.length === 0) {
+          showError('このメールアドレスは既に登録されています。下の「ログインして参加する」から進めてください。');
+          isSignup = false;
+          document.getElementById('authBtn').textContent = 'ログインして参加する';
+          document.getElementById('authToggle').textContent = 'アカウントをお持ちでない方はこちら（新規登録）';
+          btn.disabled = false;
+          return;
+        }
+        showNotice('確認メールを送信しました。メール内のリンクを開いてから、もう一度このページを開いてログインしてください。');
+        btn.disabled = false;
+        btn.textContent = isSignup ? '新規登録して参加する' : 'ログインして参加する';
+        return;
+      }
+
+      await refreshAuthUI();
+      await doJoin();
+    } catch (err) {
+      showError((err && err.message) ? err.message : 'ログインに失敗しました。もう一度お試しください。');
+    } finally {
+      btn.disabled = false;
+      btn.textContent = isSignup ? '新規登録して参加する' : 'ログインして参加する';
+    }
+  });
+
+  function renderInfo(info) {
+    document.getElementById('fPropertyName').textContent = info.propertyName || '—';
+    document.getElementById('fRoleLabel').textContent = info.roleLabel || info.role || '—';
+  }
+
+  async function load() {
+    if (!isUuidLike(inviteId)) {
+      showFatal('招待リンクが正しくありません。送られてきたリンクをもう一度お確かめください。');
+      return;
+    }
+    try {
+      var res = await fetch('/api/accept-invite?id=' + encodeURIComponent(inviteId));
+      var body = await res.json();
+      if (!res.ok) {
+        showFatal(body.error || 'リンクの読み込みに失敗しました。');
+        return;
+      }
+      inviteInfo = body.result;
+      loadingBlock.style.display = 'none';
+      mainBlock.style.display = 'block';
+      renderInfo(inviteInfo);
+      if (!inviteInfo.valid) {
+        document.getElementById('sessionBlock').style.display = 'none';
+        document.getElementById('authBlock').style.display = 'none';
+        showError(inviteInfo.reason || 'この招待リンクは現在無効です。');
+        return;
+      }
+      await refreshAuthUI();
+    } catch (err) {
+      showFatal('通信に失敗しました。電波の良い場所でもう一度お試しください。');
+    }
+  }
+
+  function isUuidLike(s) {
+    return typeof s === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(s);
+  }
+
+  load();
+})();
+</script>
+</body>
+</html>

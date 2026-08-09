@@ -1,0 +1,153 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<title>点検予定表 OCR取込 — 簡易デモ(Phase2)</title>
+<style>
+  body { font-family: -apple-system, "Hiragino Kaku Gothic ProN", sans-serif; margin: 0; padding: 24px; background: #f4f5f7; color: #222; }
+  .banner { background: #fff3cd; border: 1px solid #e0a800; color: #6b5300; padding: 10px 14px; border-radius: 6px; margin-bottom: 16px; font-size: 14px; }
+  h1 { font-size: 18px; margin: 0 0 4px; }
+  .sub { color: #666; font-size: 13px; margin-bottom: 20px; }
+  .panel { background: #fff; border: 1px solid #ddd; border-radius: 8px; padding: 16px; margin-bottom: 16px; }
+  button { background: #2f6fed; color: #fff; border: none; padding: 8px 16px; border-radius: 6px; font-size: 14px; cursor: pointer; margin-right: 8px; }
+  button.secondary { background: #888; }
+  button:hover { opacity: 0.9; }
+  select { padding: 6px; margin-right: 8px; }
+  .room-card { border: 1px solid #e0e0e0; border-radius: 6px; padding: 10px 12px; margin-bottom: 8px; }
+  .room-card.has-warning { background: #fff8ec; border-color: #e0a800; }
+  .room-head { font-weight: bold; }
+  .warn-line { color: #a66a00; font-size: 13px; margin-top: 4px; }
+  .warn-line.severity-error { color: #b00020; }
+  .meta { color: #666; font-size: 12px; }
+  pre { background: #1e1e1e; color: #d4d4d4; padding: 12px; border-radius: 6px; overflow: auto; max-height: 400px; font-size: 12px; }
+  .valid-ok { color: #1a7f37; font-weight: bold; }
+  .valid-ng { color: #b00020; font-weight: bold; }
+</style>
+</head>
+<body>
+
+<div class="banner">
+  ⚠ これは簡易プレビュー(Phase2の動作確認用デモ画面)です。実際のOCR確認画面(Phase3)・
+  原紙プレビュー(Phase6)とは別物であり、本番のLive Board画面(lb_tool/index.html)には
+  まだ組み込まれていません。
+</div>
+
+<h1>点検予定表 OCR取込 — 簡易デモ</h1>
+<div class="sub">画像/PDFを選択 → (ダミー)OCR結果取得 → OCR Normalizerで正規化 → FSDF生成、の一連の流れを確認できます。</div>
+
+<div class="panel">
+  <label>画像/PDFを選択(ダミー): </label>
+  <select id="scenarioSelect">
+    <option value="messy" selected>サンプル1(表記揺れ・矛盾を含む、こちらを推奨)</option>
+    <option value="clean">サンプル2(素直に読み取れたケース)</option>
+  </select>
+  <button id="runBtn">OCR実行(ダミー)</button>
+  <button id="rawBtn" class="secondary">OCR生結果(正規化前)を表示</button>
+</div>
+
+<div id="resultPanel" class="panel" style="display:none;">
+  <div id="summaryLine" class="meta"></div>
+  <div id="roomList"></div>
+</div>
+
+<div class="panel">
+  <div class="meta" style="margin-bottom:6px;">生成されたFSDF(JSON。開発者確認用)</div>
+  <pre id="fsdfJson">(まだ生成していません)</pre>
+</div>
+
+<!-- 依存モジュールを読み込み順に従って読み込む(window.FireFlowFsdf / window.FireFlowOcrIntake 名前空間経由) -->
+<!-- FSDF Ver2.0(Envelope化)対応: fsdf_builder.js/run_pipeline.jsがdocumentTypes.js/
+     envelopeAdapter.jsのwindow.FireFlowFsdf名前空間の値(DOCUMENT_TYPES/ENVELOPE_FSDF_VERSION/
+     unwrapEnvelope)を参照するため、他のfireflow_fsdf/配下のスクリプトより先に読み込む。 -->
+<script src="../../fireflow_fsdf/schema/documentTypes.js"></script>
+<script src="../../fireflow_fsdf/convert/envelopeAdapter.js"></script>
+<script src="../../fireflow_fsdf/convert/lbExportConverter.js"></script>
+<script src="../../fireflow_fsdf/validators/validateFsdf.js"></script>
+<script src="./mock_ocr_provider.js"></script>
+<script src="./normalize/normalizeStatus.js"></script>
+<script src="./normalize/normalizeTimePreference.js"></script>
+<script src="./normalize/buildWarnings.js"></script>
+<script src="./normalize/normalizeInspectionScheduleSheet.js"></script>
+<script src="./fsdf_builder.js"></script>
+<script src="./run_pipeline.js"></script>
+
+<script>
+(function () {
+  var runOcrIntakePipeline = window.FireFlowOcrIntake.runOcrIntakePipeline;
+  var getMockOcrRawResult = window.FireFlowOcrIntake.getMockOcrRawResult;
+
+  function renderResult(result) {
+    var panel = document.getElementById('resultPanel');
+    panel.style.display = 'block';
+    var summary = document.getElementById('summaryLine');
+    summary.innerHTML = '取込元(ダミー): ' + result.rawOcrResult.sourceFile +
+      ' / 工程日数: 全' + result.fsdf.inspection.totalScheduleDays + '日' +
+      ' / 部屋数: ' + result.fsdf.rooms.length + '件' +
+      ' / FSDFバリデーション: <span class="' + (result.validation.valid ? 'valid-ok' : 'valid-ng') + '">' +
+      (result.validation.valid ? 'valid' : 'invalid') + '</span>' +
+      '(errors:' + result.validation.errors.length + ', warnings:' + result.validation.warnings.length + ')';
+
+    var list = document.getElementById('roomList');
+    list.innerHTML = '';
+
+    if (result.fsdf.batchWarnings && result.fsdf.batchWarnings.length) {
+      var batchDiv = document.createElement('div');
+      batchDiv.className = 'room-card has-warning';
+      batchDiv.innerHTML = '<div class="room-head">帳票全体の警告</div>';
+      result.fsdf.batchWarnings.forEach(function (w) {
+        var p = document.createElement('div');
+        p.className = 'warn-line severity-' + (w.severity || 'warning');
+        p.textContent = '⚠ ' + w.message;
+        batchDiv.appendChild(p);
+      });
+      list.appendChild(batchDiv);
+    }
+
+    result.fsdf.rooms.forEach(function (r) {
+      var card = document.createElement('div');
+      var warnings = (r.sourceMeta && r.sourceMeta.warnings) || [];
+      card.className = 'room-card' + (warnings.length ? ' has-warning' : '');
+
+      var tp = r.timePreference || {};
+      var headParts = [r.roomNumber + '号室'];
+      if (r.scheduleDay) headParts.push(r.scheduleDay + '日目');
+      if (tp.period && tp.time) headParts.push(tp.period + ' ' + tp.time + (tp.note ? '(' + tp.note + ')' : ''));
+      if (r.sourceStatus) headParts.push('状態: ' + r.sourceStatus + (r.ocrStatusRaw ? '(元の記載: ' + r.ocrStatusRaw + ')' : ''));
+      if (r.ladderRoom) headParts.push('避難はしご対象');
+
+      var head = document.createElement('div');
+      head.className = 'room-head';
+      head.textContent = headParts.join(' / ');
+      card.appendChild(head);
+
+      warnings.forEach(function (w) {
+        var p = document.createElement('div');
+        p.className = 'warn-line severity-' + (w.severity || 'warning');
+        p.textContent = '⚠ ' + w.message;
+        card.appendChild(p);
+      });
+
+      list.appendChild(card);
+    });
+
+    document.getElementById('fsdfJson').textContent = JSON.stringify(result.fsdf, null, 2);
+  }
+
+  document.getElementById('runBtn').addEventListener('click', function () {
+    var scenario = document.getElementById('scenarioSelect').value;
+    runOcrIntakePipeline({ propertyId: '物件A', propertyName: 'サンプル物件', inspectionDate: '2026-07-26', scenario: scenario })
+      .then(renderResult)
+      .catch(function (e) { alert('エラー: ' + e.message); });
+  });
+
+  document.getElementById('rawBtn').addEventListener('click', function () {
+    var scenario = document.getElementById('scenarioSelect').value;
+    getMockOcrRawResult({ scenario: scenario }).then(function (raw) {
+      document.getElementById('fsdfJson').textContent = '=== OCR生結果(正規化前) ===\n' + JSON.stringify(raw, null, 2);
+    });
+  });
+})();
+</script>
+
+</body>
+</html>
