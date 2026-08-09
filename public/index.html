@@ -8707,6 +8707,27 @@
     var newSensorMaster = sensorResult.sensorMaster;
     var roomsFromSensorSheet = sensorResult.roomsFromSensorSheet; // 部屋番号一覧（フォールバック用）
 
+    // [2026-08-09追加、実LB「66室→25件」問題修正] 上のbuildSensorMasterFromSensorSheet()は
+    // シート名が「自火報（一覧）」/「自火報(一覧)」と完全一致(部分一致)する単一シートしか
+    // 見ておらず、コスモ城東野江ロイヤルフォルムのように内訳が「№1」〜「№4」等の複数シートに
+    // 分かれている物件では該当シートが見つからずroomsFromSensorSheetが空になる。その結果、
+    // 直後のfloorMap構築処理(このすぐ下)がroomsFromSensorSheetを使えず、より網羅性の低い
+    // 「一覧表」シートの消火器設置場所テキスト(newExtinguishers、代表的な号室しか記載されない
+    // ことが多い)にフォールバックしてしまい、実際には66室あるのに一部の号室(消火器設置場所に
+    // 記載された号室のみ、実例では25室)しかFLOORSに反映されない不具合があった
+    // (SENSOR MASTER P1修正でこの複数シート構成に対応するcollectSensorBreakdownFromWorkbook()
+    // 自体は既に実装済みだったが、これはSENSOR_MASTERへ値を補完するためだけに使われており、
+    // その関数が横断的に検出している網羅的な部屋番号一覧が、部屋一覧(FLOORS)の構築側では
+    // 一切利用されていなかった)。
+    // ここではcollectSensorBreakdownFromWorkbook()を早いタイミングで1回だけ呼び出し、
+    // その戻り値(entries、SENSOR_MASTERの値そのものではなく部屋番号のキーのみ)を、
+    // 直後のfloorMap構築でroomsFromSensorSheetと同格の「部屋番号一覧のフォールバック源」
+    // として追加で使えるようにする。SENSOR_MASTERへの値の書き込み(mergeSensorMasterField)
+    // は従来通りこの関数の後半で行っており、ここでは一切変更していない
+    // (breakdownResultは同じ内容を後半でも再利用し、二重計算を避けている)。
+    var breakdownResult = collectSensorBreakdownFromWorkbook(workbook);
+    var roomsFromSensorBreakdown = Object.keys(breakdownResult.entries); // 部屋番号一覧（フォールバック用、№1～№4等の複数内訳シート対応）
+
     if (!ichiranSheets.length) {
       showToast('「一覧表」シートが見つかりませんでした。フォーマットをご確認ください。');
       return;
@@ -8820,9 +8841,21 @@
     // 部屋番号が一切含まれず、0件になる場合がある＝要人手確認。詳細は取込基盤の検証ドキュメント参照）
     // 2026-07-29変更(LB改善指示書④): floorLabelOfRoom()はモジュールスコープの共有関数
     // floorLabelOfRoomNumber()(このIIFE冒頭付近を参照)へ切り出した。ロジックは完全に同一。
+    // [2026-08-09追加、実LB「66室→25件」問題修正] roomsFromSensorSheet(旧・単一シート名
+    // 一致方式)に加えて、roomsFromSensorBreakdown(新・№1～№4等の複数内訳シート横断方式、
+    // 上記で計算済み)も同格の優先ソースとして統合する(どちらか一方が空でも、もう一方に
+    // 部屋番号があればそちらを使う。両方に部屋番号がある場合は重複排除して合算する)。
+    // これにより、「自火報（一覧）」という名前の単一シートが存在しない物件でも、複数の
+    // 内訳シートから検出できた実際の部屋番号一覧がFLOORSの構築に反映されるようになる。
+    // 両方とも空の場合のみ、従来通り消火器設置場所テキストへフォールバックする(フォールバック
+    // 発生条件自体は変更していない)。
+    var roomsFromSensorData = roomsFromSensorSheet.slice();
+    roomsFromSensorBreakdown.forEach(function(room) {
+      if (roomsFromSensorData.indexOf(room) === -1) roomsFromSensorData.push(room);
+    });
     var floorMap = {};
-    if (roomsFromSensorSheet.length) {
-      roomsFromSensorSheet.forEach(function(room) {
+    if (roomsFromSensorData.length) {
+      roomsFromSensorData.forEach(function(room) {
         var floorLabel = floorLabelOfRoomNumber(room);
         if (!floorLabel) return;
         if (!floorMap[floorLabel]) floorMap[floorLabel] = [];
@@ -8951,7 +8984,9 @@
     // 差動式(sa)/定温式(tei)をSENSOR_MASTERへフィールド単位でSource補完する。総数(total)は
     // ここでは書き込まない(この内訳シートには総数列が無く、②感知器個数データが総数の
     // 一次情報源のため。総数と内訳合計の突合はsensorDisplayStateOf()側で行う)。
-    var breakdownResult = collectSensorBreakdownFromWorkbook(workbook);
+    // [2026-08-09追加、実LB「66室→25件」問題修正] breakdownResultは上記(ichiranSheets読込より
+    // 前)で既に1回計算済み(roomsFromSensorBreakdownの算出元)のため、ここでの再計算は行わず
+    // 同じ変数をそのまま再利用する(挙動は完全に同一、二重計算の削除のみ)。
     Object.keys(breakdownResult.entries).forEach(function(room) {
       var e = breakdownResult.entries[room];
       var sourceLabel = '④:' + e.sourceLabel;
