@@ -1262,6 +1262,10 @@
   .room-num-row { display: flex; align-items: baseline; gap: 6px; }
   .sched-label { font-size: calc(16px * var(--font-scale, 1)); font-weight: 800; }
   .sched-label-overridden { background: #FFF1D6; border-radius: 6px; padding: 1px 6px; }
+  /* [2026-08-09追加、実装修正フェーズ1 Fix1/Fix2] symbol('A'/'P')バッジの隣に具体的な時刻
+     (例:「13:00」「〜10:30」)を続けて表示するための追加スタイル。既存.sched-labelより
+     一回り小さいフォントで、色は継承(親のstyle="color:..."をそのまま引き継ぐ)。 */
+  .sched-label-time { font-size: calc(12px * var(--font-scale, 1)); font-weight: 700; margin-left: 2px; }
   .room-status-icon { width: 26px; height: 26px; display:flex; align-items:center; justify-content:center; border-radius: 50%; box-sizing: border-box; }
   .room-status-icon.done { color: var(--green); }
   .room-status-icon.pending { color: var(--blue); }
@@ -1316,6 +1320,14 @@
   .sensor-value-unconfirmed { color: #9AA3B2; }
   .unconfirmed-badge {
     display: inline-block; margin-top: 2px;
+    font-size: calc(11px * var(--font-scale, 1)); font-weight: 700;
+    color: #6B7280; background: #F0F1F4; border-radius: 4px; padding: 1px 7px;
+  }
+  /* [2026-08-09追加、実装修正フェーズ1 Fix4] 丸数字の合計数しか分からず、差動式/定温式の
+     内訳(sa/tei)が未確認の部屋に「合計◯」を表示するためのバッジ。.unconfirmed-badgeと
+     見た目を揃えつつ別クラスにして、既存の未確認バッジの判定・スタイルには一切影響しない。 */
+  .sensor-total-badge {
+    display: inline-block; margin-top: 2px; margin-left: 4px;
     font-size: calc(11px * var(--font-scale, 1)); font-weight: 700;
     color: #6B7280; background: #F0F1F4; border-radius: 4px; padding: 1px 7px;
   }
@@ -2697,6 +2709,11 @@
         </div></div>
         <div class="bo-row"><div class="bo-label">希望時刻</div><div class="bo-value"><input type="time" id="stampReviewTime" class="stamp-review-input"></div></div>
         <div class="bo-row"><div class="bo-label">終了時刻（範囲指定の場合）</div><div class="bo-value"><input type="time" id="stampReviewTimeEnd" class="stamp-review-input"></div></div>
+        <!-- [2026-08-09追加、実装修正フェーズ1 Fix2] OCRが申告したtime_mode(exact/start_only/
+             end_only/range)をレビュー保存まで持ち回すための非表示フィールド。利用者が直接
+             編集する項目ではない(希望時刻/終了時刻の入力状況からresolveStampTimeMode()が
+             整合性を確認したうえで採用の可否を判定する)。 -->
+        <input type="hidden" id="stampReviewTimeMode" value="">
         <div class="bo-row"><div class="bo-label">手書きメモ</div><div class="bo-value"><input type="text" id="stampReviewNote" class="stamp-review-input" placeholder="例：できるだけ早く"></div></div>
         <div class="bo-row"><div class="bo-label">お名前（任意）</div><div class="bo-value"><input type="text" id="stampReviewName" class="stamp-review-input" placeholder="例：山本"></div></div>
         <!-- 2026-07-29追加: 複数日にまたがる物件向けに、捺印表の日付欄(原文まま)を確認・修正
@@ -3662,31 +3679,68 @@
     return added;
   }
 
+  // [2026-08-09追加、SENSOR MASTER P0/P1修正] SENSOR_MASTERへフィールド単位(total/sa/tei)で
+  // Source補完するための共通ヘルパー。②(感知器個数データ、主にtotal)と④(点検結果報告書の
+  // 内訳シート、主にsa/tei)は互いに異なる情報を持つ別々のSourceであり、どちらか一方を
+  // 「優先Source」として丸ごと採用するのではなく、フィールドごとに独立して補完する
+  // (ご指示「Source優先順位ではなくSource補完ルール」に対応)。
+  // 方針：
+  // ・値がnull/undefined(数値でない)場合は何もしない(0への強制変換は行わない)。
+  // ・そのフィールドがまだ未確定(数値でない)であれば、そのまま採用する。
+  // ・そのフィールドが既に数値で確定済みの場合は、Sourceの異同を問わず無言で上書きしない
+  //   (禁止事項「不一致時にどちらかを強制優先しない」に対応。既存の「追加のみ・冪等」方針
+  //   (旧extendSensorMasterFromEntriesの部屋単位ポリシー)をフィールド単位に引き継ぐ)。
+  //   値が既存値と一致しない場合のみ entry.conflicts へ記録し、Human Review用の材料として残す
+  //   (自動確定はしない。現時点ではUI側での参照は無く、内部記録のみ)。
+  function mergeSensorMasterField(room, field, value, sourceLabel) {
+    if (typeof value !== 'number' || !room) return;
+    if (!SENSOR_MASTER[room]) SENSOR_MASTER[room] = {};
+    var entry = SENSOR_MASTER[room];
+    var sourceKey = field + 'Source';
+    var alreadyNumeric = typeof entry[field] === 'number';
+    if (alreadyNumeric) {
+      if (entry[field] !== value) {
+        entry.conflicts = entry.conflicts || [];
+        entry.conflicts.push({ field: field, existing: entry[field], existingSource: entry[sourceKey], attempted: value, attemptedSource: sourceLabel });
+      }
+      return; // 既に確定済みの値は(同一Source再取込であっても)上書きしない。
+    }
+    entry[field] = value;
+    entry[sourceKey] = sourceLabel;
+  }
+
   // 2026-08-03追加(FireFlow Ingest→FSDF→LB接続Phase1): FireFlow Ingest(住戸一覧・感知器
   // 個数表の自動解析、fireflow_ingest/)経由で得られた感知器個数で、現在のSENSOR_MASTERを
-  // 拡張する。extendRoomRosterFromRoomNumbers()と同じ「追加のみ・冪等」方針を採る:
-  // 既にSENSOR_MASTERに存在する部屋番号は上書きしない(既存の点検報告書Excel経路A由来の値を、
-  // あとから読み込んだ感知器個数表で意図せず消してしまう事故を防ぐため)。
-  // entries: { [部屋番号]: { sa: 数値|null, tei: 数値|null } }
-  // sourceType: 値の由来を表す文字列('fireflowIngest'を渡す想定)。既存経路A
-  // (buildSensorMasterFromSensorSheet)が作るエントリにはsourceフィールド自体が存在しない
-  // ため、値の有無で legacyExcel(このフィールドが無い) / fireflowIngest を判別できる。
-  // 【値を捏造しない原則、ご指示2026-08-03】sa/teiが数値でなければ0埋めせずnullのまま
-  // SENSOR_MASTERへ格納する。部屋カード表示(約3932行目、sc.sa/sc.teiをそのままテキスト
-  // 描画する箇所)はnull値を想定していないため、null値の部屋は「null」という文字列が
-  // そのまま表示される可能性がある。ご指示の通りPhase1では表示ロジック自体は変更せず、
-  // 未確認値の表示対応はPhase2で行う。
-  // 戻り値: 新規に追加された部屋番号の配列(既存部屋のみ、または空入力の場合は空配列)。
+  // 拡張する。
+  // entries: { [部屋番号]: { sa: 数値|null, tei: 数値|null, total: 数値|null } }
+  // sourceType: 値の由来を表す文字列('fireflowIngest'を渡す想定)。
+  // [2026-08-09改訂、SENSOR MASTER P1修正] 従来は「既にSENSOR_MASTERに存在する部屋番号は
+  // 丸ごとスキップ(追加のみ)」という部屋単位のポリシーだったが、これだと先に④(内訳シート、
+  // sa/teiのみ・totalなし)を読み込み済みの部屋に、②のtotalが一切補完されなくなってしまう
+  // (Source補完ができない)。mergeSensorMasterField()によるフィールド単位の補完へ変更する
+  // (部屋が丸ごと存在するかどうかではなく、total/sa/teiそれぞれが未確定かどうかで判定する)。
+  // 【値を捏造しない原則は維持】sa/tei/totalが数値でなければ0埋めせずnullのまま扱う
+  // (mergeSensorMasterFieldはnullを一切書き込まない)。
+  // 戻り値: 新規に追加された部屋番号の配列(このSENSOR_MASTERに未登録だった部屋。空入力の場合は空配列)。
   function extendSensorMasterFromEntries(entries, sourceType) {
     var added = [];
+    var sourceLabel = '②:' + (sourceType || 'fireflowIngest');
     Object.keys(entries || {}).forEach(function(room) {
       if (!room) return;
-      if (Object.prototype.hasOwnProperty.call(SENSOR_MASTER, room)) return; // 追加のみ。既存値は上書きしない。
+      var isNewRoom = !Object.prototype.hasOwnProperty.call(SENSOR_MASTER, room);
       var entry = entries[room] || {};
       var sa = typeof entry.sa === 'number' ? entry.sa : null;
       var tei = typeof entry.tei === 'number' ? entry.tei : null;
-      SENSOR_MASTER[room] = { sa: sa, tei: tei, source: sourceType || 'fireflowIngest' };
-      added.push(room);
+      var total = typeof entry.total === 'number' ? entry.total : null;
+      mergeSensorMasterField(room, 'total', total, sourceLabel);
+      mergeSensorMasterField(room, 'sa', sa, sourceLabel);
+      mergeSensorMasterField(room, 'tei', tei, sourceLabel);
+      // 後方互換: 既存コード(sensorDisplayStateOf等)がentry.sourceを参照する場合に備え、
+      // まだ設定されていなければ由来ラベルを残す(既に別経路で設定済みなら上書きしない)。
+      if (SENSOR_MASTER[room] && !SENSOR_MASTER[room].source) {
+        SENSOR_MASTER[room].source = sourceType || 'fireflowIngest';
+      }
+      if (isNewRoom) added.push(room);
     });
     // 2026-08-04追加(A): extendRoomRosterFromRoomNumbers()と同じ理由で、SENSOR_MASTERが
     // 実際に変化した場合は永続化レコードも更新しておく。
@@ -3695,29 +3749,35 @@
   }
 
   // 2026-08-03追加(Phase2①未確認UI表示、差分設計書v3 2〜3章)。感知器数(sa/tei)の表示状態を
-  // 判定する。「0とnullを明確に区別する」というご指示に基づき、fireflow_ingest経由
-  // (source==='fireflowIngest')のデータのみ、null(値を読み取れなかった)・エントリ無し
-  // (このルームの感知器数データが一切取り込まれていない)を「未確認」として区別する。
-  // 【ご確認済みの方針】既存の点検報告書Excel経路(buildSensorMasterFromSensorSheet、
-  // sourceフィールドを持たない)は、そもそも読み取れない値を0へ補完しており、後から
-  // 「本当に0件だったのか読み取れなかったのか」を区別する情報が無い。これを遡って修正する
-  // ことは今回のスコープ外とし、この関数もsource無し(経路A由来)のエントリは常にconfirmed
-  // (確認済み)として扱う。既存のbuildSensorMasterFromSensorSheet自体は一切変更しない。
-  // 戻り値: { state: 'unconfirmed_no_entry'|'unconfirmed_null'|'confirmed', sa, tei }
-  //   sa/teiは、confirmedの場合は数値、unconfirmedでその項目が未確認の場合はnull。
-  //   (sa/teiどちらか一方だけがnullという「部分未確認」もstate:'unconfirmed_null'として
-  //   表す。呼び出し側でsa/teiそれぞれ個別にnull判定して表示を決める想定)
+  // 判定する。
+  // [2026-08-09改訂、SENSOR MASTER P1修正] フィールド単位でSourceが異なり得るようになった
+  // (total=②由来、sa/tei=④由来、というように部屋ごとに混在する)ため、従来のような
+  // 「entry.source(単一の由来ラベル)がfireflowIngestかどうか」による判定はもう実態に
+  // 合わない。sa/teiそれぞれの実際の値がnullかどうかで直接判定する、より一般的な条件へ
+  // 変更する(値を捏造しない・0とnullを混同しない、という原則そのものは変更していない)。
+  // 【後方互換の確認】旧・経路A(buildSensorMasterFromSensorSheet)は数値でない場合0へ
+  // フォールバックする実装のため、sa/teiが実際にnullになることは無く、totalも設定しない
+  // (常にnull)。そのため、この関数の判定を変更しても旧・経路A由来のエントリは従来通り
+  // 常に'confirmed'として扱われる(実質的な後方互換を確認済み)。
+  // 戻り値: { state: 'unconfirmed_no_entry'|'unconfirmed_null'|'source_conflict'|'confirmed', sa, tei, total }
+  //   sa/teiは、値が判明していれば数値、未確認の場合はnull。
+  //   state==='source_conflict'は、total(②由来)とsa+tei(④由来)が食い違う場合
+  //   (SOURCE_CONFLICT。多数決や優先Sourceでの自動確定はしない。呼び出し側の既存の
+  //   isUnconfirmed判定(state !== 'confirmed')にそのまま該当するため、UI変更なしで
+  //   「要確認」として扱われる)。
   function sensorDisplayStateOf(room) {
     var entry = SENSOR_MASTER[room];
-    if (!entry) return { state: 'unconfirmed_no_entry', sa: null, tei: null };
-    if (entry.source === 'fireflowIngest') {
-      if (entry.sa === null || entry.tei === null) {
-        return { state: 'unconfirmed_null', sa: entry.sa, tei: entry.tei };
-      }
-      return { state: 'confirmed', sa: entry.sa, tei: entry.tei };
+    if (!entry) return { state: 'unconfirmed_no_entry', sa: null, tei: null, total: null };
+    var entryTotal = typeof entry.total === 'number' ? entry.total : null;
+    var sa = typeof entry.sa === 'number' ? entry.sa : null;
+    var tei = typeof entry.tei === 'number' ? entry.tei : null;
+    if (sa === null || tei === null) {
+      return { state: 'unconfirmed_null', sa: sa, tei: tei, total: entryTotal };
     }
-    // source無し(既存の点検報告書Excel経路由来) → 今回は変更しないため常にconfirmed扱い。
-    return { state: 'confirmed', sa: entry.sa, tei: entry.tei };
+    if (entryTotal !== null && (sa + tei) !== entryTotal) {
+      return { state: 'source_conflict', sa: sa, tei: tei, total: entryTotal };
+    }
+    return { state: 'confirmed', sa: sa, tei: tei, total: entryTotal };
   }
 
   // 2026-08-03追加(FireFlow Ingest→FSDF→LB接続Phase1): FireFlow Ingest(fireflow_ingest/lib/
@@ -4249,6 +4309,21 @@
     return SCHEDULE_DAY_COLOR_PALETTE[dayIndex % SCHEDULE_DAY_COLOR_PALETTE.length];
   }
   var scheduleDayColors = {}; // { [room]: {color, dayIndex} | null } 。既存scheduleLabelsとは別の変数。
+  // [2026-08-09追加、実装修正フェーズ1 Fix2] time/time_end/time_modeから、画面表示用の時刻文字列を
+  // 組み立てる。「〜」の向き(開始のみ/終了のみ/範囲)を捏造せず、実際に読み取れた形式のとおりに
+  // 表示する(例: 開始のみなら"13:00〜"、終了のみなら"〜10:30"、単発なら"9:30"、範囲なら
+  // "9:30〜10:30")。time/time_endがどちらも無ければnullを返す。
+  function formatStampTimeDisplay(time, timeEnd, timeMode) {
+    if (!time && !timeEnd) return null;
+    var mode = timeMode || (time && timeEnd ? 'range' : (timeEnd ? 'end_only' : 'exact'));
+    if (mode === 'range' && time && timeEnd) return time + '〜' + timeEnd;
+    if (mode === 'end_only' && timeEnd) return '〜' + timeEnd;
+    if (mode === 'start_only' && time) return time + '〜';
+    if (time) return time;
+    if (timeEnd) return '〜' + timeEnd;
+    return null;
+  }
+
   function initScheduleLabels() {
     var RED = '#A32D2D', BLUE = '#185FA5'; // 2026-07-17再々修正: P(午後)指定の色は青のままにする、とのご指示によりオレンジ統一の対象外
     var haRooms = {};
@@ -4257,13 +4332,23 @@
       floor.rooms.forEach(function(room) {
         var s = STAMP_DATA[room];
         if (s) {
-          if (s.symbol === 'A') scheduleLabels[room] = { text: 'A', color: RED };
-          else if (s.symbol === 'P') scheduleLabels[room] = { text: 'P', color: BLUE };
-          else if (s.time) {
-            var hour = parseInt(s.time.split(':')[0], 10);
+          // [2026-08-09改訂、実装修正フェーズ1 Fix1/Fix2] symbol(A/P)とtime/time_endは
+          // 互いに排他ではない(公式ルール)。従来はsymbolが決まるとtimeを一切見なかったため、
+          // 両方が資料に記載されている部屋でtimeが画面から消えていた(INGEST_MAPPING_ERROR)。
+          // symbolがある場合はtext(filter chip等が参照する既存の'A'/'P'という値)は変更せず、
+          // 別途timeDisplayとして時刻を保持し、部屋カード側で両方表示する(既存のフィルタ
+          // チップ・roomMatchesFilter()の判定ロジックはtext='A'/'P'のままなので影響しない)。
+          var timeDisplay = formatStampTimeDisplay(s.time, s.time_end, s.time_mode);
+          if (s.symbol === 'A') scheduleLabels[room] = { text: 'A', color: RED, timeDisplay: timeDisplay };
+          else if (s.symbol === 'P') scheduleLabels[room] = { text: 'P', color: BLUE, timeDisplay: timeDisplay };
+          else if (timeDisplay) {
+            // [2026-08-09修正] 従来は`s.time`が無い(終了のみ=end_onlyの)場合、この分岐に
+            // 一切入れず時刻表示自体が消えていた(DATA_MODEL_GAP)。time/time_endのどちらかが
+            // あればtimeDisplayが組み立てられるようにしたため、ここも両対応する。
+            var hourSrc = s.time || s.time_end;
+            var hour = parseInt(hourSrc.split(':')[0], 10);
             var color = (hour < 12) ? RED : BLUE;
-            var labelText = s.time_end ? (s.time + '〜' + s.time_end) : s.time;
-            scheduleLabels[room] = { text: labelText, color: color };
+            scheduleLabels[room] = { text: timeDisplay, color: color, timeDisplay: null };
           } else {
             scheduleLabels[room] = null;
           }
@@ -4487,8 +4572,16 @@
       // 表示等)でも使われているため変更せず、既存の「不在」時の複数行表示と同じ<br>による
       // 明示的な改行パターンを踏襲し、バッジをsensor-detailの次の行に折り返す形で追加する。
       var badgeHtml = isUnconfirmed ? '<br><span class="unconfirmed-badge" aria-label="未確認">未確認</span>' : '';
+      // [2026-08-09追加、実装修正フェーズ1 Fix4] SENSOR_MASTER[room].totalが監査で確認された
+      // INGEST_MAPPING_ERRORにより破棄されていた問題を修正(extendSensorMasterFromEntries/
+      // sensorDisplayStateOf側で対応済み)。丸数字の合計数しか読み取れておらずsa/teiの
+      // 内訳が未確認(=totalが数値として存在する)場合のみ、「合計◯」を追加表示する。
+      // sa/teiが両方確認済みの通常ケースではds.totalは常にnullのため、この行は従来通り
+      // 何も追加しない(既存の内訳表示は一切変更しない)。sa/teiをtotalから逆算表示する
+      // ことはしない(内訳未確認のままとして表示する)。
+      var totalHtml = (ds.total !== null) ? ('<br><span class="sensor-total-badge" aria-label="合計数（内訳未確認）">合計' + ds.total + '</span>') : '';
       return '<span class="' + detailCls + '"><span class="sensor-circle">差</span><span class="' + saCls + '">' + saText
-        + '</span><span class="sensor-circle">定</span><span class="' + teiCls + '">' + teiText + '</span></span>' + badgeHtml;
+        + '</span><span class="sensor-circle">定</span><span class="' + teiCls + '">' + teiText + '</span></span>' + badgeHtml + totalHtml;
     }
     var entry = state[room];
     if (status === 'done') {
@@ -4520,6 +4613,16 @@
       return '不在';
     }
     if (status === 'cancelled') return '';
+    // [2026-08-09追加、実装修正フェーズ1 Fix3] STAMP_DATA[room].note(例:「朝一」等の
+    // 自由記述の備考)は従来からOCR取込・手動保存の両経路で保存されていたが、部屋カード
+    // 側にこれを表示するコードパスが一切無く(UI_PRESENTATION_ERROR)、監査で確認済み。
+    // 元の文言をそのまま(具体的な時刻へ変換せず)表示する。noteが空の場合は何も追加せず、
+    // 既存の(空文字を返す)表示を変更しない。A/P/時刻はroom-card-top側のlabelHtmlで
+    // 別途表示されているため、ここでの表示と衝突しない。長い備考でカード崩れを避けるため
+    // 既存の.room-detail(white-space:nowrap+overflow:hidden)の1行表示ルールにそのまま従う。
+    var stampEntry = STAMP_DATA[room];
+    var noteText = (stampEntry && stampEntry.note) ? String(stampEntry.note).trim() : '';
+    if (noteText) return '<span class="room-note-text">' + escapeHtml(noteText) + '</span>';
     return '';
   }
 
@@ -4605,9 +4708,18 @@
       html += '<div class="room-grid">';
       visibleRooms.forEach(function(room) {
         var label = effectiveScheduleLabel(room);
+        // [2026-08-09改訂、実装修正フェーズ1 Fix1/Fix2] 従来はlabel.text('A'/'P'/時刻文字列の
+        // いずれか1つ)だけを表示しており、symbol('A'/'P')と具体的な時刻(time)が両方確定して
+        // いる場合でも時刻側は表示されなかった(UI_PRESENTATION_ERROR。データ側は
+        // initScheduleLabels()でscheduleLabels[room].timeDisplayとして既に保持している)。
+        // label.text(既存のフィルターチップ・かんたんモード等が参照する'A'/'P'そのものの値)は
+        // 変更せず、label.timeDisplayが値を持つ場合だけ既存バッジの後ろに続けて表示する
+        // (label.overridden時は手動上書きの時刻そのものがlabel.textに入るためtimeDisplayは
+        // 常にnullであり、この追加表示とは衝突しない)。
+        var labelTimeHtml = (label && label.timeDisplay) ? ('<span class="sched-label-time">' + escapeHtml(label.timeDisplay) + '</span>') : '';
         var labelHtml = label
           ? '<span class="sched-label' + (label.overridden ? ' sched-label-overridden' : '') + '" style="color:' + label.color + '">'
-            + (label.overridden ? '変更 ' : '') + label.text + '</span>'
+            + (label.overridden ? '変更 ' : '') + label.text + '</span>' + labelTimeHtml
           : '';
         // [2026-08-05追加、現場実機テストP0-2対応] 住戸一覧の取込でspaceType:'non_unit'
         // (近傍に管理人室・共用部・EV等のラベルがあり、住戸ではない可能性がある)と判定され、
@@ -5679,6 +5791,7 @@
     document.getElementById('stampReviewSymbol').value = (v.symbol === 'A' || v.symbol === 'P' || v.symbol === 'キャンセル') ? v.symbol : '';
     document.getElementById('stampReviewTime').value = v.time || '';
     document.getElementById('stampReviewTimeEnd').value = v.time_end || '';
+    document.getElementById('stampReviewTimeMode').value = v.time_mode || '';
     document.getElementById('stampReviewNote').value = v.note || '';
     document.getElementById('stampReviewName').value = v.name || '';
     // 2026-07-29追加: 既に正規化済みのISO日付(v.scheduleDate、例:"2026-07-25")を再編集用に
@@ -5750,6 +5863,39 @@
     if (!Array.isArray(parsedList)) throw new Error('unexpected format: ' + JSON.stringify(parsedList).slice(0, 200));
     return parsedList;
   }
+  // [2026-08-09追加、実装修正フェーズ1 Fix1/Fix2] 捺印表OCR(symbol/time/time_end)の時刻指定形式
+  // (exact/start_only/end_only/range)を判定する。ocr_intake/normalize/normalizeTimePreference.js
+  // (点検予定表OCR側)のnormalizeTimeMode()と同じ考え方だが、捺印表OCR経路(この<script>内)は
+  // 従来ocr_intake/を経由していない独立した簡易実装のため、同等のロジックをここに持つ。
+  // 【重要】symbolとtime/timeEndは互いに排他ではない(公式ルール)。この関数はtime_modeの判定のみ
+  // 行い、symbolの有無には一切関与しない。
+  // modeRaw: OCRが直接申告した'exact'|'start_only'|'end_only'|'range'(無ければ空文字/null/undefined)。
+  // 申告値が実際のtime/timeEndの有無と矛盾する場合(例: レビュー画面で人手により時刻欄だけが
+  // 編集され、古いtime_modeが残っている場合)は、矛盾したまま使わず下記フォールバック推測へ回す。
+  var VALID_STAMP_TIME_MODES = { exact: true, start_only: true, end_only: true, range: true };
+  function resolveStampTimeMode(modeRaw, time, timeEnd) {
+    var key = (modeRaw === undefined || modeRaw === null) ? '' : String(modeRaw).trim().toLowerCase();
+    if (key && VALID_STAMP_TIME_MODES[key]) {
+      // [2026-08-09修正、回帰テストで検出] 従来は'exact'/'start_only'の判定がtimeの有無しか
+      // 見ておらず、レビュー画面で終了時刻(timeEnd)が後から追加された等でtime/timeEnd両方が
+      // 揃っているのに申告modeが'exact'/'start_only'のまま矛盾なく通ってしまい、
+      // formatStampTimeDisplay()側でtimeEndが無言で捨てられる(表示からtimeEndが消える)
+      // データ欠落があった。'exact'/'start_only'はtimeEndが無いことも合わせて確認し、
+      // timeEndが存在する場合は矛盾とみなして下のフォールバック推測へ回す。
+      if (key === 'range' && time && timeEnd) return key;
+      if (key === 'start_only' && time && !timeEnd) return key;
+      if (key === 'end_only' && timeEnd) return key;
+      if (key === 'exact' && time && !timeEnd) return key;
+      // 矛盾していれば下のフォールバック推測へ。
+    }
+    // 【後方互換フォールバック】time_mode未申告(旧キャッシュ・旧OCR結果等)の場合のみ、
+    // time/timeEndの有無から安全側(「〜」を捏造しない側)に推測する。
+    if (time && timeEnd) return 'range';
+    if (!time && timeEnd) return 'end_only';
+    if (time && !timeEnd) return 'exact';
+    return '';
+  }
+
   function applyStampBulkResult(parsedList) {
     var savedCount = 0;
     // 2026-07-29追加(LB改善指示書④): 捺印表(点検希望時間連絡票)から読み取った部屋番号を
@@ -5759,16 +5905,21 @@
       var room = (item.room_number || '').toString().trim();
       if (!room) return;
       roomNumbersForRoster.push(room);
+      // [2026-08-09改訂、実装修正フェーズ1 Fix1] symbol('A'/'P'/'キャンセル')とtime/time_endは
+      // 互いに排他ではない(公式ルール)。従来`symbol ? '' : ...`でtime/time_endを強制的に空にして
+      // いたため、AM/PM区分と具体時刻が同時に記載された資料でどちらか一方が失われていた
+      // (INGEST_MAPPING_ERRORとして監査で確認)。両方読み取れた値をそのまま保持する。
       var symbol = (item.symbol === 'A' || item.symbol === 'P' || item.symbol === 'キャンセル') ? item.symbol : '';
-      var time = symbol ? '' : (item.time || '').toString().trim();
-      var timeEnd = symbol ? '' : (item.time_end || '').toString().trim();
+      var time = (item.time || '').toString().trim();
+      var timeEnd = (item.time_end || '').toString().trim();
+      var timeMode = resolveStampTimeMode(item.time_mode, time, timeEnd);
       var note = (item.note || '').toString().trim();
       var name = (item.name || '').toString().trim();
       // 2026-07-29追加: 捺印表OCRが返す「date」(原文まま、例:「25(土)」)をISO日付へ正規化し、
       // scheduleDate/scheduleDayとして追加保存する(既存5項目の意味・型は変更しない)。
       var dateRaw = (item.date || '').toString().trim();
       var resolvedDate = resolveStampScheduleDate(dateRaw);
-      var entry = { symbol: symbol, time: time, time_end: timeEnd, note: note, name: name, scheduleDate: resolvedDate.scheduleDate, scheduleDay: resolvedDate.scheduleDay };
+      var entry = { symbol: symbol, time: time, time_end: timeEnd, time_mode: timeMode, note: note, name: name, scheduleDate: resolvedDate.scheduleDate, scheduleDay: resolvedDate.scheduleDay };
       STAMP_DATA[room] = entry;
       stampScannedRooms[room] = entry;
       try {
@@ -5843,16 +5994,19 @@
   function applyStampSingleOcrResult(parsed) {
     var room = ((parsed && parsed.room_number) || '').toString().trim();
     if (!room) throw new Error('部屋番号を読み取れませんでした。');
+    // [2026-08-09改訂、実装修正フェーズ1 Fix1] applyStampBulkResult()と同じ理由でsymbolとtime/
+    // time_endの相互排他を撤廃。
     var symbol = (parsed.symbol === 'A' || parsed.symbol === 'P' || parsed.symbol === 'キャンセル') ? parsed.symbol : '';
-    var time = symbol ? '' : (parsed.time || '').toString().trim();
-    var timeEnd = symbol ? '' : (parsed.time_end || '').toString().trim();
+    var time = (parsed.time || '').toString().trim();
+    var timeEnd = (parsed.time_end || '').toString().trim();
+    var timeMode = resolveStampTimeMode(parsed.time_mode, time, timeEnd);
     var note = (parsed.note || '').toString().trim();
     var name = (parsed.name || '').toString().trim();
     // 2026-07-29追加: applyStampBulkResult()と同じく、日付(date、原文まま)をscheduleDate/
     // scheduleDayへ正規化して追加保存する(既存5項目の意味・型は変更しない)。
     var dateRaw = ((parsed && parsed.date) || '').toString().trim();
     var resolvedDate = resolveStampScheduleDate(dateRaw);
-    var entry = { symbol: symbol, time: time, time_end: timeEnd, note: note, name: name, scheduleDate: resolvedDate.scheduleDate, scheduleDay: resolvedDate.scheduleDay };
+    var entry = { symbol: symbol, time: time, time_end: timeEnd, time_mode: timeMode, note: note, name: name, scheduleDate: resolvedDate.scheduleDate, scheduleDay: resolvedDate.scheduleDay };
     STAMP_DATA[room] = entry;
     stampScannedRooms[room] = entry;
     try {
@@ -5877,6 +6031,9 @@
       document.getElementById('stampReviewSymbol').value = (parsed.symbol === 'A' || parsed.symbol === 'P' || parsed.symbol === 'キャンセル') ? parsed.symbol : '';
       document.getElementById('stampReviewTime').value = parsed.time || '';
       document.getElementById('stampReviewTimeEnd').value = parsed.time_end || '';
+      // [2026-08-09追加、実装修正フェーズ1 Fix2] OCRが申告したtime_modeをレビュー保存時まで
+      // 非表示フィールドに保持する。
+      document.getElementById('stampReviewTimeMode').value = parsed.time_mode || '';
       document.getElementById('stampReviewNote').value = parsed.note || '';
       document.getElementById('stampReviewName').value = parsed.name || '';
       // 2026-07-29追加: 単発スキャンのOCR結果(date、原文まま)をレビュー画面の日付欄に反映する。
@@ -5888,6 +6045,7 @@
       document.getElementById('stampReviewSymbol').value = '';
       document.getElementById('stampReviewTime').value = '';
       document.getElementById('stampReviewTimeEnd').value = '';
+      document.getElementById('stampReviewTimeMode').value = '';
       document.getElementById('stampReviewNote').value = '';
       document.getElementById('stampReviewName').value = '';
       document.getElementById('stampReviewDate').value = '';
@@ -5903,13 +6061,17 @@
     var symbol = document.getElementById('stampReviewSymbol').value;
     var time = document.getElementById('stampReviewTime').value;
     var timeEnd = document.getElementById('stampReviewTimeEnd').value;
+    // [2026-08-09改訂、実装修正フェーズ1 Fix1/Fix2] symbolとtime/timeEndの相互排他を撤廃。
+    // 利用者が「区分」欄(A/P/キャンセル)を選び、かつ「希望時刻」欄にも時刻を入力した場合、
+    // 従来は保存時にtime/timeEndが強制的に消されていた(INGEST_MAPPING_ERROR)。両方を保存する。
+    var timeMode = resolveStampTimeMode(document.getElementById('stampReviewTimeMode').value, time, timeEnd);
     var note = document.getElementById('stampReviewNote').value.trim();
     var name = document.getElementById('stampReviewName').value.trim();
     // 2026-07-29追加: レビュー画面の「点検日（任意）」欄(原文まま入力を想定)をscheduleDate/
     // scheduleDayへ正規化して追加保存する(既存5項目の意味・型は変更しない)。
     var dateRaw = document.getElementById('stampReviewDate').value.trim();
     var resolvedDate = resolveStampScheduleDate(dateRaw);
-    var entry = { symbol: symbol, time: symbol ? '' : time, time_end: symbol ? '' : timeEnd, note: note, name: name, scheduleDate: resolvedDate.scheduleDate, scheduleDay: resolvedDate.scheduleDay };
+    var entry = { symbol: symbol, time: time, time_end: timeEnd, time_mode: timeMode, note: note, name: name, scheduleDate: resolvedDate.scheduleDate, scheduleDay: resolvedDate.scheduleDay };
 
     STAMP_DATA[room] = entry;
     stampScannedRooms[room] = entry;
@@ -8444,6 +8606,88 @@
     return equipment;
   }
 
+  // [2026-08-09追加、SENSOR MASTER P1修正] ④点検結果報告書の感知器種別内訳(差動式スポット型／
+  // 定温式スポット型)シートを、シート名の固定文字列一致(「自火報（一覧）」等)ではなく、
+  // ヘッダー行の列見出しを手がかりに動的に検出する。コスモ城東野江ロイヤルフォルムのように、
+  // 内訳が単一の「自火報（一覧）」シートではなく「№1」〜「№4」のような連番・分割シートに
+  // 分かれている場合に対応するため、ワークブック内の全シートを走査し、該当するシートを
+  // 1枚だけに決め打ちしない(ご指示「№4固定は禁止」「自火報(配）だけ読むのは禁止」に対応)。
+  // ヘッダー行は先頭15行以内を探索する(既存の他シート探索(findSheetByContains等)と同様、
+  // 実データのヘッダー位置が様式によって多少ずれる可能性を考慮した余裕)。
+  function locateSensorBreakdownHeader(grid) {
+    var maxScanRows = Math.min(grid.length, 15);
+    for (var r = 0; r < maxScanRows; r++) {
+      var row = grid[r];
+      if (!row) continue;
+      var saCol = -1, teiCol = -1, nameCol = -1, otherCols = [];
+      for (var c = 0; c < row.length; c++) {
+        var cell = row[c] == null ? '' : String(row[c]).trim();
+        if (!cell) continue;
+        if (cell.indexOf('差動式スポット型') !== -1 && saCol === -1) saCol = c;
+        else if (cell.indexOf('定温式スポット型') !== -1 && teiCol === -1) teiCol = c;
+        else if (cell.indexOf('補償式スポット型') !== -1 || cell.indexOf('熱アナログ式スポット型') !== -1 || cell.indexOf('光電式スポット型') !== -1) otherCols.push(c);
+        if ((cell === '名称' || cell.replace(/[　\s]/g, '') === '名称') && nameCol === -1) nameCol = c;
+      }
+      if (saCol !== -1 && teiCol !== -1) {
+        return { headerRow: r, saCol: saCol, teiCol: teiCol, nameCol: nameCol, otherCols: otherCols };
+      }
+    }
+    return null;
+  }
+
+  // 「名称」列のセル値から部屋番号を抽出する。実データ(№1〜№4シート)では「1301号室」のように
+  // 「◯◯号室」表記になっている(住棟受信機の表示番号列は共用部で1,2,3...という通し番号として
+  // 使われており部屋番号と一致しないため、名称列の「号室」表記の方を採用する)。「エントランス
+  // ホール」「駐輪場」等、部屋番号として解釈できない行はnullを返しスキップする(非住戸区画を
+  // 勝手に住戸化しない。ご指示19章に対応)。
+  function extractRoomNumberFromNameCell(cell) {
+    if (cell == null) return null;
+    var s = zenkakuDigitsToHankaku(String(cell)).replace(/[　\s]/g, '').trim();
+    var m = s.match(/^(\d{2,4})号室$/);
+    if (m) return m[1];
+    if (/^\d{2,4}$/.test(s)) return s; // 「号室」無しの裸の数字のみの表記ゆれにも対応
+    return null;
+  }
+
+  // ワークブック全体から、感知器内訳(差動式/定温式)を持つシートを全て検出し、部屋番号ごとの
+  // sa(差動式)/tei(定温式)/other(補償式・熱アナログ式・光電式の合計、無ければnull)を集める。
+  // 複数シート(No.1〜No.4等)に同じ部屋番号が重複して現れることは想定していないが、安全側として
+  // 最初に見つかった値を採用し、後続の重複は上書きしない(不一致時にどちらかを強制的に
+  // 優先しないという方針を、シート内重複についても踏襲する)。
+  // 戻り値: { entries: { [部屋番号]: {sa, tei, other, sourceLabel} }, sheetsScanned: [シート名,...] }
+  function collectSensorBreakdownFromWorkbook(workbook) {
+    var entries = {};
+    var sheetsScanned = [];
+    var names = workbook.SheetNames || [];
+    for (var i = 0; i < names.length; i++) {
+      var sheetName = names[i];
+      var grid = sheetToGrid(workbook.Sheets[sheetName]);
+      var header = locateSensorBreakdownHeader(grid);
+      if (!header || header.nameCol === -1) continue;
+      sheetsScanned.push(sheetName);
+      for (var r = header.headerRow + 1; r < grid.length; r++) {
+        var row = grid[r];
+        if (!row) continue;
+        var roomStr = extractRoomNumberFromNameCell(row[header.nameCol]);
+        if (!roomStr) continue;
+        var saVal = row[header.saCol];
+        var teiVal = row[header.teiCol];
+        var sa = typeof saVal === 'number' ? saVal : null;
+        var tei = typeof teiVal === 'number' ? teiVal : null;
+        var otherSum = null;
+        for (var oc = 0; oc < header.otherCols.length; oc++) {
+          var ov = row[header.otherCols[oc]];
+          if (typeof ov === 'number') otherSum = (otherSum || 0) + ov;
+        }
+        if (sa === null && tei === null && otherSum === null) continue; // 全欄空欄の行は情報なしとして無視(0と決め付けない)
+        if (!entries[roomStr]) {
+          entries[roomStr] = { sa: sa, tei: tei, other: otherSum, sourceLabel: sheetName };
+        }
+      }
+    }
+    return { entries: entries, sheetsScanned: sheetsScanned };
+  }
+
   function parseExcelAndRebuild(workbook) {
     var sashikomiSheet = findSheetByName(workbook, ['差込データ']);
     // 2026-07-21変更: 従来はfindSheetByName(完全一致)で単一シートのみを対象にしていたが、
@@ -8689,10 +8933,33 @@
     FLOORS.forEach(function(f) { TOTAL_ROOMS += f.rooms.length; });
     EXTINGUISHER_DATA = newExtinguishers;
     if (newEquipment.length) EQUIPMENT_LIST = newEquipment;
-    if (Object.keys(newSensorMaster).length) {
-      SENSOR_MASTER = newSensorMaster;
-    } else {
-      showToast('「自火報（一覧）」シートから感知器個数を読み取れませんでした（感知器個数は前回のままです）。');
+    // [2026-08-09追加、SENSOR MASTER P0修正] parseExcelAndRebuild()はPROPERTY/FLOORS等を
+    // 丸ごと差し替える「新しい物件の読込」そのものであるため(このすぐ下の「点検中データを
+    // リセット（新しい物件のため）」ブロックと同じ前提)、SENSOR_MASTERもここで明示的に
+    // リセットする。従来は感知器内訳シートが見つからない場合、SENSOR_MASTERが前回(別物件、
+    // または起動直後の組み込みデモ)の値のまま残ってしまい、後から読み込む②(FireFlow Ingest、
+    // 追加のみ/フィールド単位補完)が、部屋番号の偶然の一致によって古い具体的な差動式/定温式の
+    // 値を新しい物件へ引き継いでしまう構造上の不具合があった(詳細:
+    // FireFlow_感知器個数取得ルール_原因調査報告_2026-08-09.md 10-B章)。
+    // なお、②を読み込むたびにリセットするわけではない(②側のextendSensorMasterFromEntries()は
+    // 引き続き追加・フィールド単位補完のみを行う)。あくまで「新しい物件の読込(=この関数の
+    // 呼び出し)」のタイミングでのみリセットする。
+    SENSOR_MASTER = {};
+    // [2026-08-09追加、SENSOR MASTER P1修正] シート名の固定文字列一致(「自火報（一覧）」等)
+    // ではなく、列見出し(「差動式スポット型」「定温式スポット型」)を手がかりに感知器内訳
+    // シートを動的に検出し、該当する全シート(本物件では№1〜№4の4枚)を横断して部屋ごとの
+    // 差動式(sa)/定温式(tei)をSENSOR_MASTERへフィールド単位でSource補完する。総数(total)は
+    // ここでは書き込まない(この内訳シートには総数列が無く、②感知器個数データが総数の
+    // 一次情報源のため。総数と内訳合計の突合はsensorDisplayStateOf()側で行う)。
+    var breakdownResult = collectSensorBreakdownFromWorkbook(workbook);
+    Object.keys(breakdownResult.entries).forEach(function(room) {
+      var e = breakdownResult.entries[room];
+      var sourceLabel = '④:' + e.sourceLabel;
+      mergeSensorMasterField(room, 'sa', e.sa, sourceLabel);
+      mergeSensorMasterField(room, 'tei', e.tei, sourceLabel);
+    });
+    if (!breakdownResult.sheetsScanned.length) {
+      showToast('感知器の型式内訳(差動式/定温式)シートが見つかりませんでした（内訳は未確認のままです。②感知器個数表があれば総数は別途反映されます）。');
     }
 
     // ---- ② 点検中データをリセット（新しい物件のため） ----
