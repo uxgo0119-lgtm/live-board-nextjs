@@ -40,3 +40,5 @@ npx tsc --noEmit --ignoreDeprecations 6.0
 → 既存の環境由来エラー7件のみ（next/react型定義未検出、本セッションのnode_modules起因）。
   handoff/はMarkdownのみでTypeScriptの対象外のため、新規エラーなし。
 ```
+
+GitHub write test: 2026-08-12 PASS
