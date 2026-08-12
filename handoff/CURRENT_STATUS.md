@@ -2,35 +2,46 @@
 
 （このファイルは現在状態のスナップショットのみ。過去履歴は蓄積しない。詳細な経緯はKnowledge Base・個別報告書を参照）
 
-- **last_updated**: 2026-08-11
-- **knowledge_base_version**: Ver1.22 (`FireFlow_Knowledge_Base_Ver1.22_2026-08-11.md`)
+- **last_updated**: 2026-08-13
+- **knowledge_base_version**: Ver1.23
 - **active_project**: Live Board（FireFlow）
-- **current_phase**: 新捺印表OCR — 実Anthropic API抽出精度検証フェーズ（BLOCKED）
-- **current_focus**: 新捺印表OCR 実Anthropic API抽出精度検証
-- **latest_completed**: 新捺印表OCR 正規化ロジックの実物サンプル検証（`FireFlow_新捺印表OCR_実物検証_2026-08-11.md`）。false positive = 0を確認。room_grid/time_grid/qr_code_areaの座標実測完了
+- **current_phase**: 新捺印表OCR — 実Anthropic API抽出精度検証前
+- **current_focus**: GitHub共有handoff連携を運用可能状態に固定し、その後OCR実API検証へ戻る
+- **latest_completed**: ChatGPT↔GitHub↔Claude Code Web のhandoff読み書き経路を実地確認。Claude Code側が`handoff/CLAUDE_REPORT.md`へ`GitHub write test: 2026-08-12 PASS`をpushし、ChatGPT側から同一内容を直接確認済み
 - **production_state**: NOT_IN_PRODUCTION（新捺印表OCR経路はLive Board本番未接続）
-- **release_state**: TESTED（新捺印表OCR正規化ロジック・handoff基盤ともにローカルテスト済み。PUSHED_TO_MAIN未満）
-- **next_gate**: 実Anthropic APIによるOCR抽出精度検証（`ANTHROPIC_API_KEY`未設定のためBLOCKED。`handoff/BLOCKERS.md`参照）
-- **known_risks**:
-  - 新捺印表OCRのAI Vision抽出精度（1003/405号室のような誤読）は未検証（正規化ロジックの正しさのみ確認済み）
-  - 座標実測はサンプル1件のみに基づく。他物件・他スキャン条件での再現性はUNKNOWN
-  - remarks_area（備考欄）は非連続な2列構造のため、現行のゾーン型では単一矩形として表現できていない（意図的にcalibrated:false）
-  - **このセッションのワーキングコピー（`/tmp/fireflow/live-board-nextjs`）にはGitリポジトリが存在しない（`.git`無し、remoteも無し）。このhandoff/自体、実際のFireFlow GitHubリポジトリへはまだ反映されていない可能性がある。詳細は`handoff/BLOCKERS.md`のBLOCKER-002を参照**
+- **release_state**: HANDOFF_OPERATIONAL / OCR_NOT_RELEASED
+- **next_gate**: 実Anthropic APIによるOCR抽出精度検証
+- **handoff_branch**: `handoff-phase1`
+- **main_policy**: ユーザー明示GOまで変更禁止
 
-## 新捺印表OCR（Standardized Stamp Sheet）機能の詳細ステータス
+## ChatGPT ↔ Claude Code handoff状態
+
+| 経路 | 状態 |
+|---|---|
+| ChatGPT → GitHub読み取り | VERIFIED |
+| ChatGPT → handoff-phase1書き込み | VERIFIED |
+| Claude Code Web → handoff-phase1書き込み/push | VERIFIED |
+| Claude Code Web → main | 禁止（ユーザーGOまで） |
+| ユーザーの通常引き継ぎ | 「Claude終わった。見て」で運用可能 |
+
+## 新捺印表OCR（Standardized Stamp Sheet）
 
 | 項目 | 状態 |
 |---|---|
-| P0実装（正規化ロジック・辞書・型定義） | COMPLETE_LOCAL、単体テスト47アサーション全PASS |
-| 実物サンプルによる正規化ロジック検証 | COMPLETE_LOCAL、false positive = 0 |
-| 802号室（A+P同時チェック）→ needs_review | 確認済み |
-| 1005号室（P+キャンセル同時チェック）→ needs_review | 確認済み（実物確認で新規発見） |
-| 805号室（P+キャンセル同時チェック）→ needs_review | 確認済み（実物確認で新規発見） |
-| 1003・405号室 | 正しい中間値(`p_checked=true`)を与えた場合、Pへ正常収束することを確認済み。AI Vision自体がチェックボックスを正しく読み取れるかはUNKNOWN |
-| symbol/time共存 | 確認済み（symbol確定後もtime_start/time_endは破棄されない） |
-| room_grid / time_grid / qr_code_area 座標calibrated | true（実測値を`layoutRegistry.ts`に反映済み） |
-| remarks_area 座標calibrated | false（意図的。非連続2列のため現行スキーマで単一矩形化不可） |
-| 実Anthropic API OCR抽出精度検証 | 未実施（`ANTHROPIC_API_KEY`未設定のためBLOCKED） |
-| LB本番（`lb_tool/index.html`）接続 | 未実施 |
-| GitHub main push | 未実施 |
+| P0実装 | 実装済み成果物あり。ただし現在の正本GitHubへの統合状態は要整理 |
+| 実物サンプルによる正規化ロジック検証 | false positive = 0 確認済み |
+| 802号室（A+P） | needs_review確認済み |
+| 1005号室（P+キャンセル） | needs_review確認済み |
+| 805号室（P+キャンセル） | needs_review確認済み |
+| symbol/time共存 | 確認済み |
+| 実Anthropic API OCR抽出精度検証 | 未完了 |
+| LB本番接続 | 未実施 |
 | Vercel production deploy | 未実施 |
+
+## ローカル / リモート環境ルール
+
+- GitHubを共有状態の正本とする。
+- Claude Code WebはGitHub中心の作業に使用する。
+- MacローカルClaude Codeは`.env.local`や実画像などローカル資源が必要な作業に限定する。
+- ローカル作業もGitHubの同一作業ブランチを基準にして開始し、成果をGitHubへ戻す。
+- APIキー・SecretはGitHubへ保存しない。
