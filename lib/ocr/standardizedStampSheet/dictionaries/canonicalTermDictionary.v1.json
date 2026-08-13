@@ -1,0 +1,17 @@
+{
+  "canonical_dictionary_version": "1.0",
+  "source_document": "FireFlow_新捺印表OCR_定型語辞書_誤読辞書_設計調査報告_Ver1_2026-08-11.md Section 3",
+  "note": "正規語→内部正規化コードのマッピング。KB-018準拠: 具体的な時刻へは変換しない(朝一→09:00等は禁止)。あくまで記号的な内部コードへのマッピングに限定する。",
+  "entries": [
+    { "canonical": "朝一", "normalized_code": "EARLY_MORNING", "aliases": ["朝イチ"] },
+    { "canonical": "午後一", "normalized_code": "EARLY_AFTERNOON", "aliases": ["午後イチ"] },
+    { "canonical": "ラスト", "normalized_code": "LAST_VISIT", "aliases": ["最終"] },
+    { "canonical": "出来るだけ早く", "normalized_code": "AS_EARLY_AS_POSSIBLE", "aliases": ["出来るだけ早目に"] },
+    { "canonical": "まで", "normalized_code": "TIME_BOUNDARY_UNTIL", "aliases": [] },
+    { "canonical": "以降", "normalized_code": "TIME_BOUNDARY_FROM", "aliases": [] },
+    { "canonical": "いつでも", "normalized_code": "ANYTIME", "aliases": [] },
+    { "canonical": "以降いつでも", "normalized_code": "FROM_TIME_ANYTIME", "aliases": [] },
+    { "canonical": "不在", "normalized_code": "ABSENT", "aliases": [] },
+    { "canonical": "キャンセル", "normalized_code": "CANCELLED", "aliases": [] }
+  ]
+}
