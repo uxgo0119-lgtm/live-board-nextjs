@@ -32,4 +32,12 @@ function assert(cond: unknown, msg: string) { if (!cond) throw new Error('FAIL: 
 { const n = normalizeGridCells(['1', null, '0', '0'], 4); assert(n.cells !== null && n.cells[1] === '', 'nullは空マス'); }
 { const n = normalizeGridCells(['1', '0'], 4); assert(n.malformed === true, 'マス数不一致はmalformed'); }
 
+// [2026-08-13追加] 実APIが区切り記号':'を1マスとして返してくるケース(実測)。
+// ':'は帳票の印字であってマスではないため除外する。除外の結果として桁が足りなければ確定しない。
+{ const r = parseGridTimeCells(['', '', ':', '']); assert(r.ok === true && r.value === null && r.raw === '', '空欄+区切りは記入なし'); }
+{ const r = parseGridTimeCells(['9', ':', '3', '0']); assert(r.ok === false && r.value === null, '区切り除外後3マスなら確定しない'); }
+{ const r = parseGridTimeCells(['1', '0', ':', '0', '0']); assert(r.ok && r.value === '10:00', '5要素でも区切りを除けば10:00'); }
+{ const r = parseGridTimeCells(['', '', ' ', '']); assert(r.ok === true && r.value === null, '空白だけのマスは空欄扱い'); }
+{ const r = parseGridTimeCells(['1', '4', '0', '0']); assert(r.ok && r.value === '14:00', '区切り無しの通常形は従来どおり'); }
+
 console.log('gridTimeParser.test.ts: ALL PASS');

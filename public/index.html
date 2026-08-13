@@ -4339,6 +4339,12 @@
           // 別途timeDisplayとして時刻を保持し、部屋カード側で両方表示する(既存のフィルタ
           // チップ・roomMatchesFilter()の判定ロジックはtext='A'/'P'のままなので影響しない)。
           var timeDisplay = formatStampTimeDisplay(s.time, s.time_end, s.time_mode);
+          // [2026-08-13追加 新捺印表OCR→LB接続] 新捺印表OCRは、A/P/キャンセルに複数チェックが
+          // ある部屋(802のA+P、1005/805のP+キャンセル)を単一symbolへ収束させず、symbolを空の
+          // まま needs_review として返す。既存のこの分岐はsymbolが'A'/'P'のときだけラベルを
+          // 付けるため、収束していない部屋がA/Pとして誤って確定表示されることはない
+          // (アダプタ側で symbol は auto_confirmed のときしか値が入らない)。
+          // 要確認であること自体は、別レイヤー(stampReviewBadgeHtmlFor)でバッジとして示す。
           if (s.symbol === 'A') scheduleLabels[room] = { text: 'A', color: RED, timeDisplay: timeDisplay };
           else if (s.symbol === 'P') scheduleLabels[room] = { text: 'P', color: BLUE, timeDisplay: timeDisplay };
           else if (timeDisplay) {
@@ -4466,6 +4472,11 @@
   // ポーリング)が、反映後のFLOORSを対象にstorageGet(keyFor(room))で改めて復元する。
   function applyCurrentPropertyRecord(record) {
     if (!record) return;
+    // [2026-08-13追加 新捺印表OCR→LB接続] 「前回の物件を続ける」でFLOORS等を復元する経路も、
+    // 冒頭のデモ用STAMP_DATAがメモリ上に残ったままだった(このレコードにSTAMP_DATAは含めない
+    // 設計のため、復元しても上書きされない)。リロードのたびにデモ値が実物件の部屋番号へ
+    // 偶然一致して表示される原因だったので、ここでも必ず無効化する。
+    clearDemoStampDataForPropertyChange();
     if (record.property && typeof record.property === 'object') PROPERTY = record.property;
     if (Array.isArray(record.floors)) FLOORS = record.floors;
     if (record.sensorMaster && typeof record.sensorMaster === 'object') SENSOR_MASTER = record.sensorMaster;
@@ -4522,6 +4533,35 @@
       try { storageDelete(scheduleOverrideKeyFor(room), true).catch(function() {}); } catch (err) {}
     });
     scheduleOverrides = {};
+  }
+
+  /* [2026-08-13追加 新捺印表OCR→LB接続] 新捺印表OCRの読み取りが「要確認」だった部屋に付ける
+     小さなバッジのHTMLを返す純粋関数。既存の住戸種別フラグ用バッジ(.review-badge、
+     ROOM_SPACE_TYPE_FLAGS)と全く同じ見た目・同じ配置場所を使い回しており、新しいCSS・
+     新しいレイアウトは追加していない(部屋カードのデザインは変更しない)。
+     要確認の理由(review_reason)はtitle属性にのみ入れ、通常表示では場所を取らない。
+     STAMP_DATAに新捺印表由来のneeds_reviewが無い既存データ(Legacy OCR・CSV取込・デモ値)では
+     常に空文字を返すため、既存の表示は1バイトも変わらない。 */
+  function stampReviewBadgeHtmlFor(room) {
+    var s = STAMP_DATA[room];
+    if (!s || !s.needs_review) return '';
+    var reasons = Array.isArray(s.review_reason) ? s.review_reason.join(' / ') : (s.review_reason || '');
+    var title = '新捺印表の読み取り結果が要確認です' + (reasons ? '（' + reasons + '）' : '');
+    return '<span class="review-badge stamp-review-badge" title="' + escapeHtml(title) + '">要確認</span>';
+  }
+
+  /* [2026-08-13追加 新捺印表OCR→LB接続] 物件が切り替わった(実物件データを読み込んだ/前回の
+     物件を復元した)ときに、このファイル冒頭のハードコードされたデモ用STAMP_DATAを無効化する。
+     背景: 部屋一覧(FLOORS)だけが実物件のExcel由来データへ置き換わる一方、STAMP_DATAは
+     デモ物件(102〜817)の値がメモリ上に残り続けていたため、実物件に偶然同じ部屋番号がある
+     と、無関係なデモの時刻(705=10:30、603=16:00等)がそのまま部屋カードに表示されていた。
+     LADDER_ROOMS/EVACUATION_EQUIPMENT_ROOMSで既に行っている「物件をまたいだ偶然一致による
+     混入を防ぐ」対応と同じ考え方を、STAMP_DATAにも適用する。
+     【重要】ここではメモリ上のSTAMP_DATAだけを空にし、永続化済みの個別キー
+     (STAMP_SCAN_KEY_PREFIX+room)は削除しない。実際にスキャンした結果を物件データの再読込
+     だけで失わせないため(全消去が必要な場合は既存のresetInspectionDataForCurrentRoomSet()を使う)。 */
+  function clearDemoStampDataForPropertyChange() {
+    STAMP_DATA = {};
   }
 
   function effectiveScheduleLabel(room) {
@@ -4729,12 +4769,16 @@
         var reviewFlag = ROOM_SPACE_TYPE_FLAGS[room];
         var reviewBadgeTitle = reviewFlag ? ('住戸ではない可能性があるため要確認です' + (reviewFlag.spaceTypeLabel ? '（近傍に「' + reviewFlag.spaceTypeLabel + '」の記載）' : '')) : '';
         var reviewBadgeHtml = reviewFlag ? '<span class="review-badge" title="' + reviewBadgeTitle + '">要確認</span>' : '';
+        // [2026-08-13追加 新捺印表OCR→LB接続] 新捺印表OCRの読み取りが要確認だった部屋のバッジ。
+        // 上のreviewBadgeHtml(住戸種別の要確認)と同じ位置・同じ見た目に並べるだけで、カードの
+        // 構造は変更しない。両方が立つ場合は2つ並ぶ(どちらも「確認が要る」という同じ意味の情報)。
+        var stampReviewBadgeHtml = stampReviewBadgeHtmlFor(room);
         if (currentHomeMode === 'sensor') {
           // 2026-07-19修正: 「感知器の時は時間指定、A.Pはいらない」のご指摘により、感知器
           // タブの部屋カードからは点検希望時刻ラベル(labelHtml、A/P/時刻)を外した。点検の
           // 予定時刻は感知器の個数を確認する文脈では不要な情報だったため。
           html += '<div data-room="' + room + '" class="room-card room-card-sensor" role="button" tabindex="0">';
-          html += '<div class="room-num-row"><div class="room-num">' + room + '</div>' + reviewBadgeHtml + '</div>';
+          html += '<div class="room-num-row"><div class="room-num">' + room + '</div>' + reviewBadgeHtml + stampReviewBadgeHtml + '</div>';
           html += '<div class="room-detail">' + detailFor(room) + '</div>';
           html += '</div>';
           return;
@@ -4783,7 +4827,7 @@
         // 部屋番号(.room-num)とほぼ同じ位置に重なり、部屋番号の文字が隠れてしまっていた。
         // カードの外側に絶対配置するのをやめ、.room-num-rowの中に部屋番号と並ぶ通常の
         // インライン要素として差し込むことで、重ならずに常に両方読めるようにした。
-        html += '<div class="room-card-top"><div class="room-num-row"><div class="room-num">' + room + '</div>' + ladder + reviewBadgeHtml + labelHtml + '</div><div class="room-status-icon ' + st + '">' + iconFor(st) + '</div></div>';
+        html += '<div class="room-card-top"><div class="room-num-row"><div class="room-num">' + room + '</div>' + ladder + reviewBadgeHtml + stampReviewBadgeHtml + labelHtml + '</div><div class="room-status-icon ' + st + '">' + iconFor(st) + '</div></div>';
         html += prevDefectHtml;
         html += '<div class="room-status-text ' + st + '">' + statusLabel(st) + '</div>';
         html += '<div class="room-detail">' + detailFor(room, st) + '</div>';
@@ -6303,6 +6347,50 @@
   // (apply_confirmed_to_lb.js経由でSTAMP_DATA/LADDER_ROOMSを更新し、画面を再描画する)を
   // 実データの部屋番号で検証できるよう、読み書き用の薄い橋渡しだけを公開する。既存の挙動・
   // 既存のUIフローには一切影響しない(参照を追加しているだけで、本番コードからは呼ばれない)。
+  /* [2026-08-13新設 新捺印表OCR→LB接続] 新捺印表OCRの変換結果(lib/ocr/standardizedStampSheet/
+     toLiveBoardStampData.ts の stampData)をLive Boardへ反映する。
+     【MASTER/DELTAの原則】部屋一覧(FLOORS)は実物件Excel由来のものがMASTER。新捺印表OCRの
+     結果はDELTA(差分)として、既にFLOORSに存在する部屋にだけstamp情報を載せる。
+     - FLOORSに無い部屋番号がOCRに含まれていても、FLOORSへ追加しない(unmatchedとして返す)
+     - OCRに含まれない部屋(例: 捺印表に印字が無い1102)は一切触らず、stamp情報なしのまま残す
+     したがってこの関数がFLOORSを書き換えることは無い。 */
+  function applyStandardizedStampDataToLb(stampData) {
+    var knownRooms = {};
+    FLOORS.forEach(function(f) { f.rooms.forEach(function(r) { knownRooms[r] = true; }); });
+
+    var appliedRooms = [], unmatchedRooms = [], needsReviewRooms = [];
+    Object.keys(stampData || {}).forEach(function(room) {
+      if (!knownRooms[room]) { unmatchedRooms.push(room); return; }
+      var src = stampData[room] || {};
+      // 既存のSTAMP_DATA形状({symbol, time, time_end, note, name})に合わせつつ、新捺印表由来の
+      // 追加情報(生チェック状態・要確認フラグと理由)を後方互換で足す。symbolは変換アダプタ側で
+      // auto_confirmedのときしか値が入らないため、複数チェックの部屋がここでA/Pに化けることはない。
+      STAMP_DATA[room] = {
+        symbol: src.symbol || '',
+        time: src.time_start || src.time || '',
+        time_end: src.time_end || '',
+        note: src.note || '',
+        name: '',
+        a_checked: !!src.a_checked,
+        p_checked: !!src.p_checked,
+        cancel_checked: !!src.cancel_checked,
+        needs_review: !!src.needs_review,
+        review_reason: Array.isArray(src.review_reason) ? src.review_reason.slice() : [],
+      };
+      appliedRooms.push(room);
+      if (STAMP_DATA[room].needs_review) needsReviewRooms.push(room);
+      stampScannedRooms[room] = STAMP_DATA[room];
+      try {
+        storageSet(STAMP_SCAN_KEY_PREFIX + room, JSON.stringify(STAMP_DATA[room]), true).catch(function() {});
+      } catch (err) { /* storage未初期化時(ローカル検証等)は保存だけスキップする */ }
+    });
+
+    initScheduleLabels();
+    renderFilterChips();
+    renderFloors();
+    return { appliedRooms: appliedRooms, unmatchedRooms: unmatchedRooms, needsReviewRooms: needsReviewRooms };
+  }
+
   window.__ffOcrConfirmTestBridge = {
     getRoomNumbers: function() {
       var allRooms = [];
@@ -6342,6 +6430,10 @@
     getPropertyScheduleDays: function() { return PROPERTY.scheduleDays; },
     getScheduleLabel: function(room) { return scheduleLabels[room]; },
     getScheduleDayColor: function(room) { return scheduleDayColors[room]; },
+    // [2026-08-13追加 新捺印表OCR→LB接続] 新捺印表OCRの変換結果をLBへ流し込む唯一のエントリ。
+    // 本番の画像アップロードUIはまだ無いため、現時点ではこのブリッジ経由(ローカル検証・
+    // 自動テスト)からのみ呼ばれる。デバッグ用の画面・ボタンは追加していない。
+    applyStandardizedStampData: function(stampData) { return applyStandardizedStampDataToLb(stampData); },
   };
 
   function openBuildingOverview() {
@@ -8998,6 +9090,12 @@
     }
 
     // ---- ② 点検中データをリセット（新しい物件のため） ----
+    // [2026-08-13追加 新捺印表OCR→LB接続] 従来ここでSTAMP_DATA(点検希望時刻)だけがリセット
+    // 対象から漏れており、実物件のExcelを読み込んで部屋一覧が入れ替わった後も、冒頭の
+    // デモ用STAMP_DATA(コスモ六甲ガーデンフォート、102〜817)がメモリ上に残っていた。その結果、
+    // 実物件に偶然同じ部屋番号があるだけで、無関係なデモの時刻(705=10:30、603=16:00等)が
+    // 部屋カードに表示されていた。他のデータと同じタイミングでクリアする。
+    clearDemoStampDataForPropertyChange();
     state = {};
     scheduleLabels = {};
     haBadges = {};

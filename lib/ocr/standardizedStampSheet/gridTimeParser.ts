@@ -22,6 +22,9 @@ const STRICT_HHMM_RE = /^([01]\d|2[0-3]):([0-5]\d)$/;
 
 const ILLEGIBLE_PLACEHOLDER = '?';
 
+// 帳票に印字されている「時」と「分」の区切り記号。マス(数字1文字)ではない。
+const SEPARATOR_CELL = ':';
+
 // 開始/終了時刻は [時十の位][時一の位][分十の位][分一の位] の4マス。
 export const TIME_CELL_COUNT = 4;
 
@@ -71,12 +74,20 @@ function isBlankCell(cell: string): boolean {
 // - 1マスでも'?' => ILLEGIBLE_DIGIT
 // - マス数が想定と違う/数字以外 => INCOMPLETE / INVALID_FORMAT
 export function parseGridTimeCells(input: unknown): GridTimeReadResult {
-  const { cells, malformed } = normalizeGridCells(input, TIME_CELL_COUNT);
+  const raw0 = normalizeGridCells(input, TIME_CELL_COUNT);
 
-  if (cells === null) {
+  if (raw0.cells === null) {
     // マス情報そのものが無い。文字列だけでは補完の有無を検証できないため確定しない。
     return { value: null, raw: '', ok: false, reason: 'CELL_DATA_UNAVAILABLE', cells: null };
   }
+
+  // [2026-08-13追加] 実API検証で、モデルが「時」と「分」の区切り記号':'を1つのマスとして
+  // 返してくることがあった(例: 記入の無い欄を ["","",":",""] 、9:30を ["9",":","3","0"])。
+  // ':'は帳票に印字された区切りであってマス(数字1文字)ではないため、数字マスの判定から
+  // 除外する。除外は「区切り記号を取り除く」だけであり、数字を推測して補うことはしない
+  // (例: ["9",":","3","0"] は除外後3マスになるので、桁数不足として確定しない)。
+  const cells = raw0.cells.filter((c) => c !== SEPARATOR_CELL);
+  const malformed = raw0.malformed && raw0.cells.length - cells.length === 0;
 
   const raw = formatCellsAsTime(cells);
 
