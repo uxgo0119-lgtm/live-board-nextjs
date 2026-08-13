@@ -3,12 +3,12 @@
 - **last_updated**: 2026-08-13
 - **knowledge_base_version**: Ver1.24
 - **active_project**: Live Board（FireFlow）
-- **current_phase**: 新捺印表OCR — GitHub正本統合完了 / 実Anthropic API抽出精度検証前
-- **current_focus**: 実Anthropic APIで新捺印表1サンプルを読み、Ground Truthとの差分を確認する
-- **latest_completed**: P0実装＋実物検証差分＋Ground Truth＋回帰テストを`fireflow-ver1-completion`へGitHub上で統合。ChatGPT側のGitHub接続から直接反映した
+- **current_phase**: 新捺印表OCR — GitHub正本統合完了 / GitHub反映後の再テスト待ち
+- **current_focus**: `fireflow-ver1-completion`を実行環境でcheckoutし、unit/release再テスト後に実Anthropic API抽出精度検証へ進む
+- **latest_completed**: P0実装＋実物検証差分＋Ground Truth＋回帰テスト一式を`fireflow-ver1-completion`へGitHub上で統合。ChatGPT側のGitHub接続から直接反映した
 - **production_state**: NOT_IN_PRODUCTION（新捺印表OCR経路はLB本番未接続）
-- **release_state**: GITHUB_INTEGRATED / TESTED_BY_CLAUDE / OCR_NOT_RELEASED
-- **next_gate**: 実Anthropic APIによるOCR抽出精度検証
+- **release_state**: GITHUB_INTEGRATED / SOURCE_PATCH_TESTED_BY_CLAUDE / GITHUB_RETEST_PENDING
+- **next_gate**: (1) GitHub反映後のunit/release再テスト、(2) 実Anthropic APIによるOCR抽出精度検証
 - **work_branch**: `fireflow-ver1-completion`
 - **main_policy**: ユーザー明示GOまで変更禁止
 
@@ -32,8 +32,9 @@
 | `taskRouting.ts` | `ocr.standardizedStampSheet`追加済み。Anthropic既定 |
 | 実物検証版layoutRegistry | 採用済み。room_grid/time_grid/qr_code_area calibrated:true、remarks_area:false |
 | Ground Truth | `ground_truth_shinnain_v1_20260811.json` GitHub保存済み |
-| unit tests | Claude作業環境で26ファイルALL PASS確認済み |
-| release tests | Claude作業環境でALL PASS確認済み。SENSOR MASTER / ROOM ROSTER回帰0 |
+| source patch unit tests | Claude作業環境で26ファイルALL PASS確認済み |
+| source patch release tests | Claude作業環境でALL PASS確認済み。SENSOR MASTER / ROOM ROSTER回帰0 |
+| GitHub直接反映後の再テスト | **未実施**。次作業で実行する |
 | false positive | 0（下流正規化ロジック実物検証） |
 | 実Anthropic API OCR | 未実施 |
 | LB本番接続 | 未実施 |
@@ -45,3 +46,4 @@
 - mainはユーザー明示GOまで変更しない。
 - APIキー・Secret・`.env.local`はGitHubへ保存しない。
 - Coworkでpushできない場合は同じpushを繰り返さず、パッチ/bundleをChatGPTまたは書き込み権限のある環境へ渡す。
+- GitHubへ直接反映した後は、反映後のHEADで必ずunit/releaseを再実行してから次Gateへ進む。
