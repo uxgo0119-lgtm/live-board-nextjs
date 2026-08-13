@@ -1,0 +1,27 @@
+{
+  "misread_dictionary_version": "1.0-confirmed",
+  "source_document": "FireFlow_新捺印表OCR_誤読辞書確定版_中間表現設計_document_type設計_2026-08-11.md Section 1(ユーザー提供の逐語リストで確定)",
+  "policy": {
+    "usage": "candidate_generation_only",
+    "not_forced_replacement": true,
+    "high_risk_never_auto_confirm_on_near_match": true,
+    "unknown_or_ambiguous_defaults_to": "要確認",
+    "raw_ocr_always_retained": true
+  },
+  "entries": [
+    {"canonical":"朝一","normalized_code":"EARLY_MORNING","risk_level":"normal","ocr_confusions":["都合一","朝イ千","朝ー","朝1","朝―","朝一。","朝一、","朝一ー"]},
+    {"canonical":"朝イチ","normalized_code":"EARLY_MORNING","risk_level":"normal","ocr_confusions":["朝イ干","朝イ千","朝イテ","朝イモ","朝イナ","朝イ一"]},
+    {"canonical":"午後一","normalized_code":"EARLY_AFTERNOON","risk_level":"normal","ocr_confusions":["午後ー","午後1","午後一。","午後―","午後イ"]},
+    {"canonical":"午後イチ","normalized_code":"EARLY_AFTERNOON","risk_level":"normal","ocr_confusions":["午後イ千","午後イ干","午後イテ","午後イ一","午後イモ"]},
+    {"canonical":"ラスト","normalized_code":"LAST_VISIT","risk_level":"normal","ocr_confusions":["ラス卜","ラス十","ラスト。","ラストー","ラス卜ー"]},
+    {"canonical":"最終","normalized_code":"LAST_VISIT","risk_level":"normal","ocr_confusions":["最絡","最終。","最終ー","最終、","最終り"]},
+    {"canonical":"出来るだけ早く","normalized_code":"AS_EARLY_AS_POSSIBLE","risk_level":"normal","ocr_confusions":["出来るだけ早い","出来るだけ早<","出来るたけ早く","出来るだけ速く","できるだけ早く","出来るだけ早ぐ"]},
+    {"canonical":"出来るだけ早目に","normalized_code":"AS_EARLY_AS_POSSIBLE","risk_level":"normal","ocr_confusions":["出来るだけ早めに","出来るたけ早目に","出来るだけ早日に","出来るだけ早目二","できるだけ早目に","出来るだけ早自に"]},
+    {"canonical":"まで","normalized_code":"TIME_BOUNDARY_UNTIL","risk_level":"normal","ocr_confusions":["まて","まτ","まで。","まで、","マデ"]},
+    {"canonical":"以降","normalized_code":"TIME_BOUNDARY_FROM","risk_level":"normal","ocr_confusions":["以後","以降。","以降、","以降ー","似降"]},
+    {"canonical":"いつでも","normalized_code":"ANYTIME","risk_level":"normal","ocr_confusions":["いつても","いっでも","いつてモ","いつでも。","いつでも、"]},
+    {"canonical":"以降いつでも","normalized_code":"FROM_TIME_ANYTIME","risk_level":"normal","ocr_confusions":["以降いつても","以後いつでも","以降いっでも","以降いつてモ","以降いつでも。","以降いつでも、"]},
+    {"canonical":"不在","normalized_code":"ABSENT","risk_level":"high","ocr_confusions":["不庄","不存","不在。","不在、","不左","不在ー"]},
+    {"canonical":"キャンセル","normalized_code":"CANCELLED","risk_level":"high","ocr_confusions":["キャソセル","キャンセ儿","キャンセル。","キャンセル、","キヤンセル","キャンセノレ","キャンセール"]}
+  ]
+}
