@@ -1,47 +1,47 @@
 # CURRENT_STATUS
 
-（このファイルは現在状態のスナップショットのみ。過去履歴は蓄積しない。詳細な経緯はKnowledge Base・個別報告書を参照）
-
 - **last_updated**: 2026-08-13
-- **knowledge_base_version**: Ver1.23
+- **knowledge_base_version**: Ver1.24
 - **active_project**: Live Board（FireFlow）
-- **current_phase**: 新捺印表OCR — 実Anthropic API抽出精度検証前
-- **current_focus**: GitHub共有handoff連携を運用可能状態に固定し、その後OCR実API検証へ戻る
-- **latest_completed**: ChatGPT↔GitHub↔Claude Code Web のhandoff読み書き経路を実地確認。Claude Code側が`handoff/CLAUDE_REPORT.md`へ`GitHub write test: 2026-08-12 PASS`をpushし、ChatGPT側から同一内容を直接確認済み
-- **production_state**: NOT_IN_PRODUCTION（新捺印表OCR経路はLive Board本番未接続）
-- **release_state**: HANDOFF_OPERATIONAL / OCR_NOT_RELEASED
+- **current_phase**: 新捺印表OCR — GitHub正本統合完了 / 実Anthropic API抽出精度検証前
+- **current_focus**: 実Anthropic APIで新捺印表1サンプルを読み、Ground Truthとの差分を確認する
+- **latest_completed**: P0実装＋実物検証差分＋Ground Truth＋回帰テストを`fireflow-ver1-completion`へGitHub上で統合。ChatGPT側のGitHub接続から直接反映した
+- **production_state**: NOT_IN_PRODUCTION（新捺印表OCR経路はLB本番未接続）
+- **release_state**: GITHUB_INTEGRATED / TESTED_BY_CLAUDE / OCR_NOT_RELEASED
 - **next_gate**: 実Anthropic APIによるOCR抽出精度検証
-- **handoff_branch**: `handoff-phase1`
+- **work_branch**: `fireflow-ver1-completion`
 - **main_policy**: ユーザー明示GOまで変更禁止
 
-## ChatGPT ↔ Claude Code handoff状態
+## handoff状態
 
 | 経路 | 状態 |
 |---|---|
 | ChatGPT → GitHub読み取り | VERIFIED |
-| ChatGPT → handoff-phase1書き込み | VERIFIED |
-| Claude Code Web → handoff-phase1書き込み/push | VERIFIED |
-| Claude Code Web → main | 禁止（ユーザーGOまで） |
-| ユーザーの通常引き継ぎ | 「Claude終わった。見て」で運用可能 |
+| ChatGPT → `fireflow-ver1-completion`書き込み | VERIFIED |
+| Claude Code Web → GitHub書き込み | 環境依存。handoff-phase1では実績あり |
+| Cowork → GitHub書き込み | DENIED（git proxy権限制約） |
+| バックアップ経路 | Claude/Coworkで実装・テスト → パッチZIP → ChatGPTがGitHubへ直接反映 |
+| main | 未変更 |
 
-## 新捺印表OCR（Standardized Stamp Sheet）
+## 新捺印表OCR
 
 | 項目 | 状態 |
 |---|---|
-| P0実装 | 実装済み成果物あり。ただし現在の正本GitHubへの統合状態は要整理 |
-| 実物サンプルによる正規化ロジック検証 | false positive = 0 確認済み |
-| 802号室（A+P） | needs_review確認済み |
-| 1005号室（P+キャンセル） | needs_review確認済み |
-| 805号室（P+キャンセル） | needs_review確認済み |
-| symbol/time共存 | 確認済み |
-| 実Anthropic API OCR抽出精度検証 | 未完了 |
+| `standardizedStampSheet.ts` | GitHub統合済み |
+| `lib/ocr/standardizedStampSheet/*` | GitHub統合済み |
+| `taskRouting.ts` | `ocr.standardizedStampSheet`追加済み。Anthropic既定 |
+| 実物検証版layoutRegistry | 採用済み。room_grid/time_grid/qr_code_area calibrated:true、remarks_area:false |
+| Ground Truth | `ground_truth_shinnain_v1_20260811.json` GitHub保存済み |
+| unit tests | Claude作業環境で26ファイルALL PASS確認済み |
+| release tests | Claude作業環境でALL PASS確認済み。SENSOR MASTER / ROOM ROSTER回帰0 |
+| false positive | 0（下流正規化ロジック実物検証） |
+| 実Anthropic API OCR | 未実施 |
 | LB本番接続 | 未実施 |
 | Vercel production deploy | 未実施 |
 
-## ローカル / リモート環境ルール
+## 運用ルール
 
 - GitHubを共有状態の正本とする。
-- Claude Code WebはGitHub中心の作業に使用する。
-- MacローカルClaude Codeは`.env.local`や実画像などローカル資源が必要な作業に限定する。
-- ローカル作業もGitHubの同一作業ブランチを基準にして開始し、成果をGitHubへ戻す。
-- APIキー・SecretはGitHubへ保存しない。
+- mainはユーザー明示GOまで変更しない。
+- APIキー・Secret・`.env.local`はGitHubへ保存しない。
+- Coworkでpushできない場合は同じpushを繰り返さず、パッチ/bundleをChatGPTまたは書き込み権限のある環境へ渡す。
