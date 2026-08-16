@@ -48,3 +48,6 @@ next-env.d.ts
 /test/trace/
 
 /test/unit/ocr/standardizedStampSheet/realScanToCanonical.test.ts
+
+# Local real-property fixtures
+/test/fixtures/parkeast1/

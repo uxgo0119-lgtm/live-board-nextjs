@@ -3724,8 +3724,11 @@
   //   (旧extendSensorMasterFromEntriesの部屋単位ポリシー)をフィールド単位に引き継ぐ)。
   //   値が既存値と一致しない場合のみ entry.conflicts へ記録し、Human Review用の材料として残す
   //   (自動確定はしない。現時点ではUI側での参照は無く、内部記録のみ)。
+  // [2026-08-16改訂] 戻り値を追加した(SENSOR_MASTERの中身を実際に書き換えた場合のみtrue)。
+  // 呼び出し元が「値が変わったのに保存されない」状態を検知できるようにするためで、
+  // 書き込みの条件・優先順位・conflictsの記録内容は一切変更していない。
   function mergeSensorMasterField(room, field, value, sourceLabel) {
-    if (typeof value !== 'number' || !room) return;
+    if (typeof value !== 'number' || !room) return false;
     if (!SENSOR_MASTER[room]) SENSOR_MASTER[room] = {};
     var entry = SENSOR_MASTER[room];
     var sourceKey = field + 'Source';
@@ -3734,11 +3737,13 @@
       if (entry[field] !== value) {
         entry.conflicts = entry.conflicts || [];
         entry.conflicts.push({ field: field, existing: entry[field], existingSource: entry[sourceKey], attempted: value, attemptedSource: sourceLabel });
+        return true; // 値自体は上書きしないが、conflictsは保存対象の変化である。
       }
-      return; // 既に確定済みの値は(同一Source再取込であっても)上書きしない。
+      return false; // 既に確定済みの値は(同一Source再取込であっても)上書きしない。
     }
     entry[field] = value;
     entry[sourceKey] = sourceLabel;
+    return true;
   }
 
   // 2026-08-03追加(FireFlow Ingest→FSDF→LB接続Phase1): FireFlow Ingest(住戸一覧・感知器
@@ -3756,6 +3761,9 @@
   // 戻り値: 新規に追加された部屋番号の配列(このSENSOR_MASTERに未登録だった部屋。空入力の場合は空配列)。
   function extendSensorMasterFromEntries(entries, sourceType) {
     var added = [];
+    // [2026-08-16追加] 「新規の部屋は無いが、既存の部屋へ値を補完した」場合にも保存されるよう、
+    // 実際に書き換えが起きたかどうかを追跡する(下の保存条件で使う)。
+    var changed = false;
     var sourceLabel = '②:' + (sourceType || 'fireflowIngest');
     Object.keys(entries || {}).forEach(function(room) {
       if (!room) return;
@@ -3764,19 +3772,28 @@
       var sa = typeof entry.sa === 'number' ? entry.sa : null;
       var tei = typeof entry.tei === 'number' ? entry.tei : null;
       var total = typeof entry.total === 'number' ? entry.total : null;
-      mergeSensorMasterField(room, 'total', total, sourceLabel);
-      mergeSensorMasterField(room, 'sa', sa, sourceLabel);
-      mergeSensorMasterField(room, 'tei', tei, sourceLabel);
+      if (mergeSensorMasterField(room, 'total', total, sourceLabel)) changed = true;
+      if (mergeSensorMasterField(room, 'sa', sa, sourceLabel)) changed = true;
+      if (mergeSensorMasterField(room, 'tei', tei, sourceLabel)) changed = true;
       // 後方互換: 既存コード(sensorDisplayStateOf等)がentry.sourceを参照する場合に備え、
       // まだ設定されていなければ由来ラベルを残す(既に別経路で設定済みなら上書きしない)。
       if (SENSOR_MASTER[room] && !SENSOR_MASTER[room].source) {
         SENSOR_MASTER[room].source = sourceType || 'fireflowIngest';
       }
-      if (isNewRoom) added.push(room);
+      // [2026-08-16修正] 従来は「入力に部屋番号が含まれていれば」新規追加として数えていたが、
+      // sa/tei/totalがすべてnull(値が読めなかった部屋)の場合、mergeSensorMasterField()は
+      // 何も書き込まないためSENSOR_MASTERにはその部屋のエントリ自体が作られない。それでも
+      // 「N件の部屋の感知器個数を追加しました」と数えてしまい、実際より多い件数を成功として
+      // 表示していた。実際にエントリができた部屋だけを数える(件数を捏造しない)。
+      if (isNewRoom && Object.prototype.hasOwnProperty.call(SENSOR_MASTER, room)) added.push(room);
     });
     // 2026-08-04追加(A): extendRoomRosterFromRoomNumbers()と同じ理由で、SENSOR_MASTERが
     // 実際に変化した場合は永続化レコードも更新しておく。
-    if (added.length) persistCurrentProperty();
+    // [2026-08-16修正] 従来の条件は「新規の部屋が増えた場合」だけだった。そのため、既に
+    // SENSOR_MASTERに存在する部屋へ感知器個数を補完しただけの取込(例: 先に部屋一覧・
+    // 点検報告書を読み込んでから感知器個数表を読み込む、同じ資料を再取込する)では保存が
+    // 走らず、再読込で補完した値が消えていた。実際に書き換えが起きた場合も保存する。
+    if (added.length || changed) persistCurrentProperty();
     return added;
   }
 
@@ -3810,6 +3827,60 @@
       return { state: 'source_conflict', sa: sa, tei: tei, total: entryTotal };
     }
     return { state: 'confirmed', sa: sa, tei: tei, total: entryTotal };
+  }
+
+  // [2026-08-16追加、P0-2 実ファイル監査(コスモザ・パークイースト1)で確定した不具合の修正]
+  // FireFlow IngestのParserへ渡すシートを、Workbookの中から「実際に値のある1枚」として選ぶ。
+  //
+  // 【従来の問題】感知器個数表・住戸一覧のどちらの分岐も SheetNames[0](1枚目)固定でParserへ
+  // 渡していた。実ファイルには「捺印表テンプレートを流用した結果、1枚目・2枚目には部屋番号
+  // しか無く、3枚目にだけ感知器の個数が書かれている」という3シート構成のものが実在し、
+  // 値のあるシートへ一度も到達しないまま「対応していない資料です」で終わっていた。
+  // これは特定物件の事情ではなく、複数シート構成のExcel全般に効く一般修正として直す。
+  //
+  // 【方針】シート名のハードコードはしない(「感知器個数」という名前が付いている保証は無い)。
+  // 全シートを既存Parserへ通し、ok:trueになったシートの中から scoreResult() が最大のものを
+  // 採用する(同点なら先に現れたシート)。ok:trueが1枚も無い場合は、従来と同じ「1枚目の
+  // 失敗結果」を返し、エラー文言も従来どおりにする(1シート構成の既存帳票では、通る経路も
+  // 結果も従来と完全に同じになる)。
+  // 戻り値: null | { sheetName, result, score }
+  function pickIngestSheetResult(workbook, parseSheet, scoreResult) {
+    var names = (workbook && workbook.SheetNames) || [];
+    var firstResult = null;
+    var best = null;
+    for (var i = 0; i < names.length; i++) {
+      var res = null;
+      try {
+        res = parseSheet(sheetToGrid(workbook.Sheets[names[i]]));
+      } catch (err) {
+        res = null;
+      }
+      if (!res) continue;
+      if (!firstResult) firstResult = { sheetName: names[i], result: res, score: 0 };
+      if (!res.ok) continue;
+      var score = scoreResult(res);
+      if (!best || score > best.score) best = { sheetName: names[i], result: res, score: score };
+    }
+    return best || firstResult;
+  }
+
+  // 「感知器個数として意味のある結果か」の指標。部屋のエントリ数ではなく、実際に個数の値
+  // (sa/tei/total のいずれか)を確定できた部屋の数を数える。部屋番号だけが並ぶシートが
+  // たまたまParserに通っても、値のあるシートに負けるようにするため。
+  function scoreSensorCountResult(result) {
+    var entries = (result && result.data && result.data.sensorMaster) || {};
+    var count = 0;
+    Object.keys(entries).forEach(function(room) {
+      var e = entries[room] || {};
+      if (typeof e.sa === 'number' || typeof e.tei === 'number' || typeof e.total === 'number') count++;
+    });
+    return count;
+  }
+
+  // 「部屋一覧として意味のある結果か」の指標。取得できた部屋番号の数。
+  function scoreRoomRosterResult(result) {
+    var rooms = (result && result.data && result.data.rooms) || {};
+    return Object.keys(rooms).length;
   }
 
   // 2026-08-03追加(FireFlow Ingest→FSDF→LB接続Phase1): FireFlow Ingest(fireflow_ingest/lib/
@@ -10378,13 +10449,32 @@
         try {
           var sensorBuf = await readFileAsArrayBuffer(draft.file);
           var sensorWorkbook = XLSX.read(new Uint8Array(sensorBuf), { type: 'array', cellDates: false });
-          var sensorSheetName = sensorWorkbook.SheetNames[0];
-          var sensorGrid = sheetToGrid(sensorWorkbook.Sheets[sensorSheetName]);
-          var sensorResult = FireFlowIngest.parseSensorCountSheet(sensorGrid);
-          if (sensorResult.ok) {
+          // [2026-08-16修正、P0-2] 従来のSheetNames[0](1枚目)固定をやめ、全シートを既存Parserへ
+          // 通して「実際に感知器の個数が読めたシート」を採用する(pickIngestSheetResult()の
+          // コメント参照)。1シート構成の帳票では従来と完全に同じ結果になる。
+          var sensorPick = pickIngestSheetResult(sensorWorkbook, FireFlowIngest.parseSensorCountSheet, scoreSensorCountResult);
+          var sensorResult = sensorPick ? sensorPick.result
+            : { ok: false, reason: 'NO_READABLE_SHEET', detail: '読み取れるシートが1枚もありませんでした' };
+          // [2026-08-16追加、P0-1 MASTERの正本ソース] 感知器数のExcelには、感知器の個数だけで
+          // なく「立入対象の部屋一覧」がそのまま入っていることが実ファイル監査で確認された
+          // (捺印表テンプレートを流用しているため、部屋番号の枠がそのまま残っている)。
+          // 既存の parseRoomRosterSheet()(住戸一覧の正式Parser)へ同じWorkbookを通し、部屋一覧が
+          // 取れた場合は、既存の toPropertyMasterIntake() → applyPropertyMasterIntakeToLb() という
+          // 【既存の唯一のMASTER構築経路】へそのまま渡す。新しいMASTERの正本は増やさない。
+          // これはExcel由来のため「MASTERはExcel由来を正本とする/OCRからMASTERを作らない」という
+          // 恒久ルールにも適合する。
+          var sensorFileRosterPick = pickIngestSheetResult(sensorWorkbook, FireFlowIngest.parseRoomRosterSheet, scoreRoomRosterResult);
+          var sensorFileRosterResult = (sensorFileRosterPick && sensorFileRosterPick.result.ok) ? sensorFileRosterPick.result : null;
+          // 感知器個数が読めなくても部屋一覧が読めた場合は、読めた分を捨てずに取り込む
+          // (逆も同じ)。両方とも読めなかった場合のみ、従来どおりunsupportedで終わる。
+          if (sensorResult.ok || sensorFileRosterResult) {
             var sensorIntake = FireFlowIngest.toPropertyMasterIntake({
-              sensorCountResult: sensorResult,
-              sourceMeta: { sensorCount: { sourceFileName: draft.fileName, importedAt: new Date().toISOString() } },
+              sensorCountResult: sensorResult.ok ? sensorResult : null,
+              roomRosterResult: sensorFileRosterResult,
+              sourceMeta: {
+                sensorCount: { sourceFileName: draft.fileName, importedAt: new Date().toISOString() },
+                roomRoster: { sourceFileName: draft.fileName, importedAt: new Date().toISOString() },
+              },
             });
             var sensorApplied = applyPropertyMasterIntakeToLb(sensorIntake);
             // 2026-08-03修正(実ブラウザE2E検証で判明): applyPropertyMasterIntakeToLb()は
@@ -10413,14 +10503,28 @@
             var invisibleSensorRooms = sensorApplied.addedSensorRooms.filter(function(room) {
               return !FLOORS.some(function(f) { return f.rooms.indexOf(room) !== -1; });
             });
-            if (sensorApplied.addedSensorRooms.length) {
-              draft.statusNote = sensorApplied.addedSensorRooms.length + '件の部屋の感知器個数を追加しました。';
-              if (invisibleSensorRooms.length) {
-                draft.statusNote += '(うち' + invisibleSensorRooms.length + '件は、対応する部屋がまだ住戸一覧に登録されていないため、部屋カードにはまだ表示されません。先に住戸一覧(捺印表)を取り込んでから、この感知器個数表を再度取り込んでください。)';
-              }
-            } else {
-              draft.statusNote = '新規に追加できる部屋はありませんでした(既存の部屋番号のみでした)。';
+            // [2026-08-16修正、P0-1] 同じ資料から部屋一覧も取り込むようになったため、
+            // 「部屋を何件追加したか」も感知器個数の件数と併せて必ず表示する。
+            var sensorNotes = [];
+            if (sensorApplied.addedRooms.length) {
+              sensorNotes.push(sensorApplied.addedRooms.length + '件の部屋を部屋一覧へ追加しました。');
             }
+            if (sensorApplied.addedSensorRooms.length) {
+              sensorNotes.push(sensorApplied.addedSensorRooms.length + '件の部屋の感知器個数を追加しました。');
+              if (invisibleSensorRooms.length) {
+                sensorNotes.push('(うち' + invisibleSensorRooms.length + '件は、対応する部屋がまだ住戸一覧に登録されていないため、部屋カードにはまだ表示されません。先に住戸一覧(捺印表)を取り込んでから、この感知器個数表を再度取り込んでください。)');
+              }
+            }
+            // [2026-08-16追加] 片方しか読めなかった場合は、成功として黙らせずにその旨を出す。
+            if (!sensorResult.ok) {
+              sensorNotes.push('※この資料から感知器の個数は読み取れませんでした(' + (sensorResult.detail || sensorResult.reason || '認識できないフォーマットです') + ')。部屋一覧のみ取り込みました。');
+            } else if (!sensorFileRosterResult) {
+              sensorNotes.push('※この資料から部屋一覧は読み取れませんでした。感知器個数のみ取り込みました。');
+            }
+            if (!sensorNotes.length) {
+              sensorNotes.push('新規に追加できる部屋はありませんでした(既存の部屋番号のみでした)。');
+            }
+            draft.statusNote = sensorNotes.join('');
           } else {
             draft.status = 'unsupported';
             draft.statusNote = UNSUPPORTED_DOC_NOTE + '(' + (sensorResult.detail || sensorResult.reason || '認識できないフォーマットです') + ')';
@@ -10446,9 +10550,12 @@
         try {
           var rosterBuf = await readFileAsArrayBuffer(draft.file);
           var rosterWorkbook = XLSX.read(new Uint8Array(rosterBuf), { type: 'array', cellDates: false });
-          var rosterSheetName = rosterWorkbook.SheetNames[0];
-          var rosterGrid = sheetToGrid(rosterWorkbook.Sheets[rosterSheetName]);
-          var rosterResult = FireFlowIngest.parseRoomRosterSheet(rosterGrid);
+          // [2026-08-16修正、P0-2] 感知器個数表の分岐と同じ理由で、SheetNames[0](1枚目)固定を
+          // やめ、全シートを既存Parserへ通して部屋番号が最も多く取れたシートを採用する。
+          // 1シート構成の帳票では従来と完全に同じ結果になる。
+          var rosterPick = pickIngestSheetResult(rosterWorkbook, FireFlowIngest.parseRoomRosterSheet, scoreRoomRosterResult);
+          var rosterResult = rosterPick ? rosterPick.result
+            : { ok: false, reason: 'NO_READABLE_SHEET', detail: '読み取れるシートが1枚もありませんでした' };
           if (rosterResult.ok) {
             var rosterIntake = FireFlowIngest.toPropertyMasterIntake({
               roomRosterResult: rosterResult,

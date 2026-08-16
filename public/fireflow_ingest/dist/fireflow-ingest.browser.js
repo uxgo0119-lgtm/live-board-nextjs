@@ -2071,11 +2071,23 @@ module.exports = {
 // 別の列にある「別の部屋番号」を差動/定温の個数と誤読する事故が実際に発生した
 // (2026-08-02、この物件の対応時にtableFormatParser.detect()へ「同じ行の他列にも
 // 部屋番号らしき値が並ぶ場合は確信度を0にする」というガードを追加して修正済み)。
+//
+// [2026-08-16改訂、P0-3 略記「差N・定M」対応] 実ファイル監査(コスモザ・パークイースト1)で、
+// レイアウトはこの形式(階ラベル無し・部屋番号の行+直下の自由記述セル)とまったく同じまま、
+// 語句だけが「差動6・定温2」ではなく「差4・定2」と略記される帳票が見つかった。これは
+// 一物件固有の書き方ではなく「差動式/定温式を1文字へ略す」という一般的な表記ゆれのため、
+// 新しいフォーマット(Parser)を増やさず、この形式の語句パターンを
+// 「差(動)?N」「定(温)?M」へ一般化して吸収する(sa=N / tei=M / total=N+M は
+// toPropertyMasterIntake.sensorMasterFragmentFrom()が従来どおり算出する)。
+// 併せて、全角数字(差４・定２)も既存のzenkakuDigitsToHankaku()で正規化してから読む
+// (部屋番号側では以前から行っていた正規化を、個数側にも同じ方針で適用する)。
+// 「差動式スポット型」のように「差(動)」の直後が数字ではない語句には一致しない
+// (\s*(\d+)を要求するため)。
 'use strict';
 
 const ROOM_NUMBER_PATTERN = /^\d{2,4}$/;
-const SA_PATTERN = /差動\s*(\d+)/g;
-const TEI_PATTERN = /定温\s*(\d+)/g;
+const SA_PATTERN = /差動?\s*(\d+)/g;
+const TEI_PATTERN = /定温?\s*(\d+)/g;
 
 function zenkakuDigitsToHankaku(str) {
   return String(str).replace(/[０-９]/g, (ch) => String.fromCharCode(ch.charCodeAt(0) - 0xfee0));
@@ -2099,7 +2111,8 @@ function lastMatchNumber(text, pattern) {
 // 0で補完せずnull(未確認)のまま返すよう修正した。
 function extractCount(cellValue) {
   if (cellValue == null) return null;
-  const text = String(cellValue);
+  // [2026-08-16] 全角数字の表記ゆれ(「差４・定２」)を、部屋番号側と同じ方針で先に吸収する。
+  const text = zenkakuDigitsToHankaku(String(cellValue));
   const sa = lastMatchNumber(text, SA_PATTERN);
   const tei = lastMatchNumber(text, TEI_PATTERN);
   if (sa === null && tei === null) return null;
@@ -2148,15 +2161,16 @@ function detect(grid) {
         // [2026-08-02追加] 「グランドハイツ魚崎」の実データで、括弧の中にも差動/定温の
         // 数字が入っているセルが見つかった(floorSummaryTextFormatParser.jsに追加した
         // ガードと同じ理由。詳細はfloorFormatWithConfirmedSubcountParser.jsのコメント参照)。
-        const parenMatch = String(cellValue).match(/[\(（]([^\)）]*)[\)）]/);
-        if (parenMatch && (/差動\s*\d+/.test(parenMatch[1]) || /定温\s*\d+/.test(parenMatch[1]))) {
+        // [2026-08-16] extractCount()と同じ語句・数字の正規化を、このガードにも合わせる。
+        const parenMatch = zenkakuDigitsToHankaku(String(cellValue)).match(/[\(（]([^\)）]*)[\)）]/);
+        if (parenMatch && (/差動?\s*\d+/.test(parenMatch[1]) || /定温?\s*\d+/.test(parenMatch[1]))) {
           roomsWithParenSubcount++;
         }
       }
     }
     if (anyCount) pairedRows++;
   }
-  if (pairedRows === 0) return { matches: false, confidence: 0, reason: '部屋番号の行の直下に「差動」「定温」を含むテキストが見つからない' };
+  if (pairedRows === 0) return { matches: false, confidence: 0, reason: '部屋番号の行の直下に「差動N/差N」「定温M/定M」を含むテキストが見つからない' };
 
   if (roomsWithCount > 0 && roomsWithParenSubcount / roomsWithCount >= 0.3) {
     return {
@@ -2170,7 +2184,7 @@ function detect(grid) {
   return {
     matches: true,
     confidence: Math.min(0.95, confidence),
-    reason: `部屋番号の行${headerRows.length}件中${pairedRows}件で直下に「差動/定温」テキストを検出(部屋${roomsWithCount}/${totalRoomCols}件、階ラベルは無し)`,
+    reason: `部屋番号の行${headerRows.length}件中${pairedRows}件で直下に「差動N・定温M」(略記「差N・定M」を含む)テキストを検出(部屋${roomsWithCount}/${totalRoomCols}件、階ラベルは無し)`,
   };
 }
 
@@ -2207,7 +2221,7 @@ function parse(grid) {
         sensorMaster[roomStr] = { sa: null, tei: null };
         warnings.push({
           code: 'SENSOR_VALUE_MISSING',
-          detail: `部屋${roomStr}(行${h.row + 1}): セルに「差動」「定温」いずれの記載も見つかりません(セルの内容: ${JSON.stringify(cellValue)})。0件と決め付けず未確認のまま保持しています。原本を確認してください。`,
+          detail: `部屋${roomStr}(行${h.row + 1}): セルに「差動N/差N」「定温M/定M」いずれの記載も見つかりません(セルの内容: ${JSON.stringify(cellValue)})。0件と決め付けず未確認のまま保持しています。原本を確認してください。`,
           row: h.row + 1, room: roomStr,
         });
         continue;
@@ -2237,7 +2251,7 @@ function parse(grid) {
 
 module.exports = {
   id: 'sensorCount.roomOnlyPairRowsFormat.v1',
-  label: '部屋番号のみペア行形式(階ラベル無し、部屋番号の行+直下に「差動N・定温M」を自由記述、階合計なし)',
+  label: '部屋番号のみペア行形式(階ラベル無し、部屋番号の行+直下に「差動N・定温M」/略記「差N・定M」を自由記述、階合計なし)',
   detect,
   parse,
 };
