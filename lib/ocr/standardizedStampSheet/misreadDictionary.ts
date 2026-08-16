@@ -43,10 +43,18 @@ function riskLevelOfNormalizedCode(normalizedCode: string): 'normal' | 'high' | 
   return null;
 }
 
+// [2026-08-15追加 Phase 2] 「まだ備考を読んでいない」状態を表す既定値。
+// FireFlow辞書は正式パイプラインの1箇所(時間指定行の備考)でだけ適用する、という原則を
+// 構造として守るために用意した。備考を持たないエントリの初期値を作るためだけに
+// matchAgainstDictionaries('') を呼ぶと、辞書の適用箇所が複数あるように見えてしまう。
+export function blankMisreadMatch(): MisreadMatch {
+  return { canonical: null, normalizedCode: null, state: 'needs_review', matchedVia: null, riskLevel: null };
+}
+
 export function matchAgainstDictionaries(rawText: string): MisreadMatch {
   const text = rawText.trim();
   if (!text) {
-    return { canonical: null, normalizedCode: null, state: 'needs_review', matchedVia: null, riskLevel: null };
+    return blankMisreadMatch();
   }
 
   if (EXACT_CANONICAL_MAP.has(text)) {

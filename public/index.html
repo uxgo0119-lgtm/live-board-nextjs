@@ -1956,6 +1956,8 @@
 <script src="ocr_intake/normalize/normalizeInspectionScheduleSheet.js"></script>
 <script src="ocr_intake/fsdf_builder.js"></script>
 <script src="ocr_intake/run_pipeline.js"></script>
+<!-- [2026-08-15追加 Phase 1] 予定情報の唯一の正本(StampStore)。index.html本体より先に読み込む。 -->
+<script src="stamp_store/stamp_store.js"></script>
 <script src="ocr_confirm/review_state.js"></script>
 <script src="ocr_confirm/filters.js"></script>
 <script src="ocr_confirm/row_view_model.js"></script>
@@ -2435,20 +2437,31 @@
       <div class="settings-v2-header-icon" aria-hidden="true">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline></svg>
       </div>
-      <div class="settings-v2-header-title">データを読み込む</div>
+      <div class="settings-v2-header-title">資料を読み込む</div>
       <button type="button" id="uploadChoiceCloseX" class="settings-v2-close-x" aria-label="閉じる">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
       </button>
     </div>
     <div class="settings-v2-body" style="padding-top:0;">
-      <div class="upload-choice-desc">読み込むデータの種類を選択してください。</div>
+      <div class="upload-choice-desc">読み込みたい資料を選んでください。種類は自動で判別します。</div>
       <div class="upload-choice-cards">
-        <!-- 2026-07-21追加: 「資料をまとめて追加」(Phase 1)。点検報告書／点検希望時間連絡票の
-             2択に当てはまらない資料(住戸一覧・捺印表・設備一覧・感知器個数表など)も含め、
-             複数ファイルをまとめて選択できる入り口。今後の主要な導線にしたいとのご意向のため、
-             他の2枚と差別化した青アクセント(.upload-choice-card-primary)を付け、一番上に配置した。
-             既存の#uploadChoiceReport・#uploadChoiceStampの見た目・挙動には一切手を加えていない。 -->
-        <button type="button" class="upload-choice-card upload-choice-card-primary" id="uploadChoiceBatch">
+        <!-- [2026-08-13変更 読み込み入口の一本化] 現場で「どのボタンから入れればいいのか」の
+             迷いが起きていたため、利用者から見える読み込み入口をこの1枚だけにした。
+             ファイルを選ぶと、拡張子・枚数から内部で適切な処理へ自動的に振り分ける
+             (捺印表の画像=新捺印表OCR、それ以外=従来の資料取込)。
+             下の3枚(資料をまとめて追加／点検報告書／点検希望時間連絡票)は、既存の処理を
+             壊さないためDOM・イベントはそのまま残し、表示だけを止めている。 -->
+        <button type="button" class="upload-choice-card upload-choice-card-primary" id="uploadChoiceUnified">
+          <span class="upload-choice-card-icon upload-choice-card-icon-primary" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
+          </span>
+          <span class="upload-choice-card-text">
+            <span class="upload-choice-card-title">資料を読み込む</span>
+            <span class="upload-choice-card-sub">写真（JPG・PNG）・PDF・Excelをそのまま選べます</span>
+          </span>
+          <span class="settings-v2-chevron" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 6 15 12 9 18"></polyline></svg></span>
+        </button>
+        <button type="button" class="upload-choice-card upload-choice-card-primary" id="uploadChoiceBatch" style="display:none;">
           <span class="upload-choice-card-icon upload-choice-card-icon-primary" aria-hidden="true">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14"></path><path d="M5 12h14"></path></svg>
           </span>
@@ -2458,7 +2471,7 @@
           </span>
           <span class="settings-v2-chevron" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 6 15 12 9 18"></polyline></svg></span>
         </button>
-        <button type="button" class="upload-choice-card" id="uploadChoiceReport">
+        <button type="button" class="upload-choice-card" id="uploadChoiceReport" style="display:none;">
           <span class="upload-choice-card-icon" aria-hidden="true">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="9" y1="13" x2="15" y2="13"></line><line x1="9" y1="17" x2="15" y2="17"></line></svg>
           </span>
@@ -2468,7 +2481,7 @@
           </span>
           <span class="settings-v2-chevron" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 6 15 12 9 18"></polyline></svg></span>
         </button>
-        <button type="button" class="upload-choice-card" id="uploadChoiceStamp">
+        <button type="button" class="upload-choice-card" id="uploadChoiceStamp" style="display:none;">
           <span class="upload-choice-card-icon upload-choice-card-icon-teal" aria-hidden="true">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="16" rx="3"></rect><line x1="16" y1="3" x2="16" y2="7"></line><line x1="8" y1="3" x2="8" y2="7"></line><line x1="3" y1="10" x2="21" y2="10"></line><line x1="8.5" y1="16" x2="15.5" y2="16"></line></svg>
           </span>
@@ -2479,6 +2492,12 @@
           <span class="settings-v2-chevron" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 6 15 12 9 18"></polyline></svg></span>
         </button>
       </div>
+      <!-- [2026-08-13追加 読み込み入口の一本化] 一本化した入口用のファイル選択。
+           画像はMIMEタイプと拡張子の両方を明示して指定する(端末・ブラウザによっては
+           拡張子だけ、あるいはMIMEだけでは候補から外れてJPGが選べないことがあるため)。 -->
+      <input type="file" id="unifiedUploadInput" multiple
+             accept="image/jpeg,image/png,.jpg,.jpeg,.png,application/pdf,.pdf,.xlsx,.xls,.csv,.heic"
+             style="display:none">
       <button type="button" id="uploadChoiceDocListBtn" class="upload-choice-doclist-link">追加済みの資料一覧を見る</button>
     </div>
     <button type="button" id="uploadChoiceCancel" class="settings-v2-close-btn">キャンセル</button>
@@ -2673,15 +2692,25 @@
 
   <div id="stampScanPanel">
     <div class="panel-top">
-      <div class="panel-title">点検希望時間連絡票スキャン</div>
+      <!-- [2026-08-13変更 読み込み入口の一本化] 読み取り中・確認中の見出しは、利用者から見て
+           内部の経路名(Legacy/新OCR等)が分からない中立的な文言にする。文言は各フローの開始時に
+           setStampPanelTitle()で設定する。 -->
+      <div class="panel-title" id="stampScanPanelTitle">資料を読み取る</div>
       <button id="closeStampScan" class="close-x-btn" aria-label="閉じる">×</button>
     </div>
 
-    <div id="stampScanIdle">
+    <!-- [2026-08-13変更 読み込み入口の一本化] 複数の読み込みボタン(PDFで一括スキャン／1枚ずつ
+         撮影／新捺印表)を現場ユーザーへ並べて見せないため、この選択画面は既定で非表示にした。
+         DOM・イベントハンドラは既存処理を壊さないためそのまま残している(読み込みの入口は
+         「資料を読み込む」1つに統合され、そこから内部で自動的に振り分けられる)。 -->
+    <div id="stampScanIdle" style="display:none;">
       <div class="panel-hint">PDFで全ページ一括スキャンできます（おすすめ）。1枚ずつの撮影にも対応しています。</div>
       <button type="button" class="primary" id="stampScanPdfBtn" style="width:100%; height:46px; margin-top:10px;">📄 PDFで一括スキャンする</button>
       <button type="button" id="stampScanCaptureBtn" style="width:100%; height:44px; margin-top:8px;">📷 連絡票を1枚ずつ撮影する</button>
     </div>
+    <!-- 読み取りに失敗したときの理由表示。上の選択画面とは独立して出す(失敗時に隠してある
+         複数ボタンが現れてしまわないようにするため)。 -->
+    <div id="standardizedStampScanError" class="stamp-scan-error" style="display:none; margin-top:8px;"></div>
 
     <div id="stampScanBulkLoading" style="display:none; text-align:center; padding:30px 0;">
       <div class="stamp-scan-spinner"></div>
@@ -2733,6 +2762,9 @@
   </div>
   <input type="file" id="stampScanInput" accept="image/*" capture="environment" style="display:none">
   <input type="file" id="stampScanPdfInput" accept=".pdf" style="display:none">
+  <!-- [2026-08-13変更 読み込み入口の一本化] 新捺印表専用のファイル選択は廃止した。
+       読み込みの入口は「資料を読み込む」(#unifiedUploadInput)1つに統合され、選ばれた
+       ファイルの種類に応じて内部で新捺印表OCRへ振り分けられる。 -->
 
   <!-- 2026-07-26追加(Phase3): 点検予定表OCR確認画面。既存のstampScanPanelとは完全に独立した
        画面であり、既存の部屋カードUI・stamp OCR関連DOM・関数には一切手を加えない。
@@ -4237,6 +4269,96 @@
     if (document.visibilityState === 'visible') { updateSyncBadge(); flushOutbox(); }
   });
   document.addEventListener('supabase-ready', flushOutbox);
+
+  /* ============================================================
+     [2026-08-15新設 Phase 1] 予定情報の唯一の正本 StampStore の結線。
+
+     従来、部屋ごとの予定情報(記号・時刻・備考)は STAMP_DATA へ12箇所から直接書き込まれ、
+     経路ごとに形が違い、保存はIndexedDB+リモートの2系統なのに復元はリモート一覧しか
+     見ていなかった(通信失敗時は静かに0件復元)。ここで保存・復元の入口を1つにする。
+
+     ・書き込み: stampStore.putMany() のみ。STAMP_DATAへ直接代入しない。
+     ・保存先  : storageSet()(IndexedDB即時 + リモート、失敗時は送信キュー)をそのまま利用。
+     ・復元    : ローカル(IndexedDB)の一覧を必ず含めて読む。リモートが落ちていても復元できる。
+     ・表示    : STAMP_DATAは stampStore からの派生ビュー(syncStampDataFromStore)に降格する。
+     ============================================================ */
+  // 保存キーの一覧は、ローカル(IndexedDB cache)とリモートの両方から集めて重複を除く。
+  // 【重要】既存のstorageList()はリモートのみを見ており、window.storage未初期化・通信失敗時に
+  // 静かに空を返す。復元をそれだけに依存させない(Phase 0で確認した消失原因の1つ)。
+  async function listKeysLocalFirst(prefix) {
+    var keys = {};
+    try {
+      var cached = await lcGetAll('cache');
+      cached.forEach(function (item) {
+        var raw = String(item.key || '');
+        // lcCacheKey() は 'own:' / 'shared:' を前置している。予定情報は共有(shared=true)で保存する。
+        var stripped = raw.indexOf('shared:') === 0 ? raw.slice('shared:'.length)
+          : (raw.indexOf('own:') === 0 ? raw.slice('own:'.length) : raw);
+        if (stripped.indexOf(prefix) === 0) keys[stripped] = true;
+      });
+    } catch (err) { /* ローカルが読めなくてもリモート側だけで続行する */ }
+    try {
+      var remote = await storageList(prefix, true);
+      (remote && remote.keys ? remote.keys : []).forEach(function (k) { keys[k] = true; });
+    } catch (err) { /* リモートが落ちていてもローカル側だけで復元できる */ }
+    return Object.keys(keys);
+  }
+
+  var stampStore = window.FireFlowStampStore.createStampStore({
+    adapters: {
+      list: function (prefix) { return listKeysLocalFirst(prefix); },
+      get: function (key) {
+        return storageGet(key, true).then(function (r) { return r ? r.value : null; }).catch(function () { return null; });
+      },
+      set: function (key, value) { return storageSet(key, value, true); },
+      remove: function (key) { return storageDelete(key, true); }
+    }
+  });
+
+  // 物件スコープ。Excel由来のMASTER(物件)が切り替わったら必ず更新する。
+  // (PROPERTY_IDのハードコード問題はPhase 1の対象外。ここではキー名で論理的に分離する)
+  function currentPropertyScopeKey() {
+    return window.FireFlowStampStore.normalizePropertyKey(PROPERTY && PROPERTY.name);
+  }
+  function knownRoomNumbersFromFloors() {
+    var rooms = [];
+    FLOORS.forEach(function (f) { f.rooms.forEach(function (r) { rooms.push(r); }); });
+    return rooms;
+  }
+  /* 描画側が読む STAMP_DATA / stampScannedRooms を、正本から作り直す。
+     【重要】STAMP_DATAは「表示用の派生ビュー」であり、正本ではない。ここ以外で代入しない。 */
+  function syncStampDataFromStore() {
+    STAMP_DATA = stampStore.toStampDataView();
+    stampScannedRooms = stampStore.toStampDataView();
+    return STAMP_DATA;
+  }
+  /* 予定情報をLBへ反映する共通経路。新捺印表・Legacy・CSV・手入力のすべてがここを通る。
+     MASTERに無い部屋は受け付けない(OCRからMASTERを作らない)。 */
+  function applyStampRecordsToLb(records, source) {
+    stampStore.setPropertyKey(currentPropertyScopeKey());
+    var result = stampStore.putMany(records, { knownRooms: knownRoomNumbersFromFloors(), source: source });
+    syncStampDataFromStore();
+    initScheduleLabels();
+    renderFilterChips();
+    renderFloors();
+    return result;
+  }
+  /* 物件スコープの予定情報を保存先から復元して描画へ反映する。
+     起動経路(前回の物件を続ける/新規/デモ)とExcel再読込の後、必ずこれを通す。 */
+  async function reloadStampStoreForCurrentProperty() {
+    // window.storage(リモート)の初期化を少しだけ待つ。待てなくてもローカルから復元できる。
+    for (var waited = 0; !window.storage && waited < 3000; waited += 300) {
+      await new Promise(function (resolve) { setTimeout(resolve, 300); });
+    }
+    stampStore.setPropertyKey(currentPropertyScopeKey());
+    var result = await stampStore.loadAll({ knownRooms: knownRoomNumbersFromFloors() });
+    syncStampDataFromStore();
+    initScheduleLabels();
+    renderFilterChips();
+    renderFloors();
+    return result;
+  }
+
   var currentEquipmentName = null;
   // 2026-08-04変更(A/B: 起動ゲート追加に伴う修正、実物件E2E検証で発見)。従来このseedDemoState()
   // は即時実行関数(IIFE)として、スクリプトのパース時点で無条件に(=起動ゲートでの選択に
@@ -4252,6 +4374,17 @@
   // 場合にのみ明示的に呼び出す(loadDemoPropertySeedState()、initPropertyStartupGate()内)
   // ように変更した。
   function seedDemoState() {
+    // [2026-08-15追加 Phase 1] デモ物件の予定情報(このファイル冒頭のSTAMP_DATA初期値)も、
+    // 他経路と同じ正本(StampStore)へ入れる。これにより「デモだけ別の置き場所」を無くし、
+    // 物件スコープの違いによって実物件へ混入しないことも構造的に保証される。
+    try {
+      var demoSeed = STAMP_DATA;
+      stampStore.setPropertyKey(currentPropertyScopeKey());
+      stampStore.putMany(Object.keys(demoSeed).map(function(room) {
+        return window.FireFlowStampStore.fromLegacyEntry(room, demoSeed[room], { source: 'demo' });
+      }), { knownRooms: knownRoomNumbersFromFloors(), source: 'demo' });
+      syncStampDataFromStore();
+    } catch (err) { /* デモ表示が主目的のため、失敗しても起動は続ける */ }
     Object.keys(SEED_STATE_RAW).forEach(function(room) {
       var e = SEED_STATE_RAW[room];
       var entry = {
@@ -4326,6 +4459,7 @@
 
   function initScheduleLabels() {
     var RED = '#A32D2D', BLUE = '#185FA5'; // 2026-07-17再々修正: P(午後)指定の色は青のままにする、とのご指示によりオレンジ統一の対象外
+    var SYMBOL_GRAY = '#6B7280'; // A/P以外の記号(キャンセル)用。既存のキャンセルチップ(gray)と同系色
     var haRooms = {};
     EVACUATION_EQUIPMENT_ROOMS.forEach(function(r) { haRooms[r] = true; });
     FLOORS.forEach(function(floor) {
@@ -4355,6 +4489,18 @@
             var hour = parseInt(hourSrc.split(':')[0], 10);
             var color = (hour < 12) ? RED : BLUE;
             scheduleLabels[room] = { text: timeDisplay, color: color, timeDisplay: null };
+          } else if (s.symbol) {
+            // [2026-08-16追加 一括検証で判明したRENDER_FAILの修正] 確定した記号がA/P以外
+            // (現状は'キャンセル')の部屋は、Canonical・保存・復元まで記号を正しく保持して
+            // いるにも関わらず、上の分岐がA/Pしか見ないため部屋カードから記号が消えていた
+            // (特定物件の問題ではなく、キャンセル記入のある全物件で起きる)。
+            // 既存の絞り込み(renderFilterChips/roomMatchesFilterはlabel.textを参照し、
+            // 'キャンセル'は既に「点検状態のキャンセル」チップが使っている値)へ混ぜないため、
+            // textはnullのままにして表示専用のsymbolTextだけを持たせる。これは2026-08-09に
+            // timeDisplayを追加したときと同じ「textは変更せず表示用の値を別に持つ」方式。
+            // この分岐は時刻表示の分岐より後ろに置いてあるので、今まで表示できていた部屋の
+            // 見え方は1件も変わらない(記号も時刻も無く何も出ていなかった部屋だけが増える)。
+            scheduleLabels[room] = { text: null, symbolText: s.symbol, color: SYMBOL_GRAY, timeDisplay: null };
           } else {
             scheduleLabels[room] = null;
           }
@@ -4378,6 +4524,9 @@
     Object.keys(scheduleLabels).forEach(function(room) {
       var label = effectiveScheduleLabel(room);
       if (!label) return;
+      // [2026-08-16追加] 表示専用ラベル(text=null、A/P以外の記号)はチップを作らない。
+      // 従来どおりA/Pと時刻だけがチップになる(絞り込みの挙動は変更なし)。
+      if (!label.text) return;
       if (label.text === 'A') hasA = true;
       else if (label.text === 'P') hasP = true;
       else timeSet[label.text] = label.color;
@@ -4422,9 +4571,9 @@
      「少なくとも{property, floors, sensorMaster, savedAt}」を実装する上で、同じ理由
      (物件をまたいだ混入防止)から合わせて対象に含めた)をひとまとめのレコードとして
      fireflow-lb-cache(storageSet/storageGet、共有=trueでSupabaseにも同期)へ保存する。
-     STAMP_DATAは既存どおり部屋ごとの個別キー(STAMP_SCAN_KEY_PREFIX+room)で永続化されて
-     いるため、このレコードには含めない(ご指示にある「既存の永続化のままでもよい」の
-     選択肢を採用)。
+     予定情報(記号・時刻・備考)は、このレコードには含めない。[2026-08-15改訂 Phase 1/2]
+     予定情報の正本は StampStore で、物件スコープを含むキー 'stamp:<物件>:<部屋>' に
+     部屋ごとに保存・復元される(保存も復元も、そこ1本だけを通る)。
      ============================================================ */
   var CURRENT_PROPERTY_KEY = 'fireflow-property:current';
 
@@ -4506,6 +4655,19 @@
     if (buildingEl) buildingEl.textContent = PROPERTY.name || '';
     var progressTotalEl = document.getElementById('progressTotalLabel');
     if (progressTotalEl) progressTotalEl.textContent = ' / ' + TOTAL_ROOMS + '件';
+    // [2026-08-14追加 読み取り結果が再読込で消える不具合の修正] 上のclearDemo〜でメモリ上の
+    // STAMP_DATAを空にした「後」に、永続化済みの読み取り結果を復元する(順序が逆だと消える)。
+    restoreStampDataFromStorage();
+  }
+
+  /* [2026-08-15改訂 Phase 1] 予定情報の復元は StampStore に一本化した。
+     従来の実装は storageList()(リモートのみ)に全依存しており、window.storage未初期化・
+     通信失敗・未ログインのときに静かに0件復元となり、「読み取り直後は出るのに再読込で消える」
+     原因になっていた。StampStore側の一覧はローカル(IndexedDB)を必ず含むため、オフラインでも
+     復元できる。復元先は現在のFLOORS(MASTER)に在る部屋だけで、部屋を増やすことはない。
+     旧キー(fireflow-stamp:<room>)は、現スコープに1件も無いときだけ一度取り込む。 */
+  async function restoreStampDataFromStorage() {
+    return reloadStampStoreForCurrentProperty();
   }
 
   // 2026-08-04追加(A/C: 新規物件作成時のデータ混入防止)。従来#resetDataConfirmOkクリック
@@ -4525,10 +4687,12 @@
       delete state[room];
       try { storageDelete(keyFor(room), true).catch(function() {}); } catch (err) {}
     });
-    Object.keys(STAMP_DATA).forEach(function(room) {
-      try { storageDelete(STAMP_SCAN_KEY_PREFIX + room, true).catch(function() {}); } catch (err) {}
-    });
-    STAMP_DATA = {};
+    // [2026-08-15改訂 Phase 1] 予定情報は物件スコープ単位でまとめて消す(従来はメモリ上の
+    // STAMP_DATAに残っていたキー分しか消せず、保存側に取り残しが出ていた)。
+    // [2026-08-15改訂 Phase 2] STAMP_DATAは正本(StampStore)からの派生ビューなので、
+    // ここで直接空にせず、正本を消してから派生ビューを作り直す(代入箇所を1つに保つ)。
+    try { stampStore.clearPersisted(); } catch (err) {}
+    syncStampDataFromStore();
     Object.keys(scheduleOverrides).forEach(function(room) {
       try { storageDelete(scheduleOverrideKeyFor(room), true).catch(function() {}); } catch (err) {}
     });
@@ -4545,8 +4709,18 @@
   function stampReviewBadgeHtmlFor(room) {
     var s = STAMP_DATA[room];
     if (!s || !s.needs_review) return '';
+    // [2026-08-15追加 Phase 2] どの項目が要確認なのかを、既存のtitle(長押し/ホバーで出る説明)に
+    // 日本語で示す。カードの見た目・レイアウトは変更していない(バッジは従来どおり「要確認」)。
+    // 部屋ごと丸ごと怪しいのではなく「備考だけ」「時刻だけ」であることが分かるようにするため。
+    var fields = [];
+    if (s.symbol_review) fields.push('記号');
+    if (s.time_review) fields.push('時刻');
+    if (s.note_review) fields.push('備考');
     var reasons = Array.isArray(s.review_reason) ? s.review_reason.join(' / ') : (s.review_reason || '');
-    var title = '新捺印表の読み取り結果が要確認です' + (reasons ? '（' + reasons + '）' : '');
+    var title = fields.length
+      ? ('新捺印表の読み取りで確認が必要な項目：' + fields.join('・'))
+      : '新捺印表の読み取り結果が要確認です';
+    if (reasons) title += '（' + reasons + '）';
     return '<span class="review-badge stamp-review-badge" title="' + escapeHtml(title) + '">要確認</span>';
   }
 
@@ -4557,11 +4731,16 @@
      と、無関係なデモの時刻(705=10:30、603=16:00等)がそのまま部屋カードに表示されていた。
      LADDER_ROOMS/EVACUATION_EQUIPMENT_ROOMSで既に行っている「物件をまたいだ偶然一致による
      混入を防ぐ」対応と同じ考え方を、STAMP_DATAにも適用する。
-     【重要】ここではメモリ上のSTAMP_DATAだけを空にし、永続化済みの個別キー
-     (STAMP_SCAN_KEY_PREFIX+room)は削除しない。実際にスキャンした結果を物件データの再読込
-     だけで失わせないため(全消去が必要な場合は既存のresetInspectionDataForCurrentRoomSet()を使う)。 */
+     【重要】ここではメモリ上の予定情報だけを空にし、保存済みのデータは削除しない。実際に
+     スキャンした結果を物件データの再読込だけで失わせないため(全消去が必要な場合は既存の
+     resetInspectionDataForCurrentRoomSet()を使う)。 */
   function clearDemoStampDataForPropertyChange() {
-    STAMP_DATA = {};
+    // [2026-08-15改訂 Phase 1] 正本(StampStore)のメモリも空にする。保存済みデータは消さない
+    // (物件スコープが変わればキー空間ごと分かれるため、別物件の値が混ざることはない)。
+    // [2026-08-15改訂 Phase 2] STAMP_DATAは正本(StampStore)からの派生ビュー。直接空にせず、
+    // 正本のメモリを空にしてから派生ビューを作り直す(代入箇所を1つに保つ)。
+    try { stampStore.clearMemory(); } catch (err) {}
+    syncStampDataFromStore();
   }
 
   function effectiveScheduleLabel(room) {
@@ -4663,6 +4842,21 @@
     var stampEntry = STAMP_DATA[room];
     var noteText = (stampEntry && stampEntry.note) ? String(stampEntry.note).trim() : '';
     if (noteText) return '<span class="room-note-text">' + escapeHtml(noteText) + '</span>';
+    /* [2026-08-15追加 Phase 2 実LB最終確認] 備考がFireFlow辞書で確定できなかった場合でも、
+       読み取った原文(note_raw)は部屋カードに出す。
+       従来はnote(確定した業務語)しか描画パスが無く、辞書に無い語で返ってきた備考は、
+       原文が正本に保存されているにもかかわらず画面から完全に消えていた(実LBで801号室の
+       「朝一」が欠落した経路)。利用者から見ると「備考は何も書かれていない部屋」と区別が
+       付かず、原本を確認する手掛かりまで失われる。
+       ここで行うのは「読めた文字をそのまま出す」ことだけで、辞書の正規語へ寄せたり具体的な
+       時刻へ変換したりはしない(誤確定は増えない)。確定していないことは、この部屋に必ず
+       付いている既存の「要確認」バッジ(stampReviewBadgeHtmlFor。説明に「備考」と出る)で
+       示されるため、新しいバッジ・新しいCSSは追加していない。 */
+    var noteRawText = (stampEntry && stampEntry.note_raw) ? String(stampEntry.note_raw).trim() : '';
+    if (noteRawText) {
+      return '<span class="room-note-text" title="' + escapeHtml('読み取った備考の原文です（確定できていないため、原本の確認が必要です）') + '">'
+        + escapeHtml(noteRawText) + '</span>';
+    }
     return '';
   }
 
@@ -4757,9 +4951,12 @@
         // (label.overridden時は手動上書きの時刻そのものがlabel.textに入るためtimeDisplayは
         // 常にnullであり、この追加表示とは衝突しない)。
         var labelTimeHtml = (label && label.timeDisplay) ? ('<span class="sched-label-time">' + escapeHtml(label.timeDisplay) + '</span>') : '';
-        var labelHtml = label
+        // [2026-08-16改訂] label.textはA/P/時刻(絞り込みが参照する値)のまま。A/P以外の記号は
+        // 表示専用のlabel.symbolTextに入るため、表示するときだけ両方を見る。
+        var labelText = label ? (label.text || label.symbolText || '') : '';
+        var labelHtml = labelText
           ? '<span class="sched-label' + (label.overridden ? ' sched-label-overridden' : '') + '" style="color:' + label.color + '">'
-            + (label.overridden ? '変更 ' : '') + label.text + '</span>' + labelTimeHtml
+            + (label.overridden ? '変更 ' : '') + escapeHtml(labelText) + '</span>' + labelTimeHtml
           : '';
         // [2026-08-05追加、現場実機テストP0-2対応] 住戸一覧の取込でspaceType:'non_unit'
         // (近傍に管理人室・共用部・EV等のラベルがあり、住戸ではない可能性がある)と判定され、
@@ -5754,12 +5951,19 @@
   document.getElementById('closeProgressDetail').addEventListener('click', closeProgressDetail);
 
   /* ---- 物件概要（物件名タップで表示。引き継ぎメモ等の固定情報） ---- */
-  /* ---- 点検希望時間連絡票スキャン（AI画像認識で読み取り、STAMP_DATAへ反映） ---- */
-  var STAMP_SCAN_KEY_PREFIX = 'fireflow-stamp:';
-  var stampScannedRooms = {}; // このセッションで取得済みの一覧表示用（実データはSTAMP_DATAが正）
+  /* ---- 点検希望時間連絡票スキャン（AI画像認識で読み取り、予定情報の正本へ反映） ---- */
+  // [2026-08-15削除 Phase 2] 旧保存キーの接頭辞 STAMP_SCAN_KEY_PREFIX('fireflow-stamp:') は
+  // どこからも参照されなくなったため削除した。予定情報の保存キーは物件スコープを含む
+  // 'stamp:<物件>:<部屋>' に一本化されており、旧キーは StampStore が復元時に一度だけ
+  // 取り込む(stamp_store.js の LEGACY_KEY_PREFIX)。
+  // [2026-08-15改訂 Phase 1] 一覧表示用の派生ビュー。正本は StampStore(syncStampDataFromStore で再生成)。
+  var stampScannedRooms = {};
   var stampPendingRoom = null;
 
   function openStampScan() {
+    // [2026-08-13追加 読み込み入口の一本化] このパネルは新捺印表の読み取り進捗表示にも使うため、
+    // 見出しを既存フロー用に戻してから開く(現在この関数はUIからは呼ばれない)。
+    setStampPanelTitle('点検希望時間連絡票スキャン');
     document.getElementById('stampScanPanel').style.display = 'block';
     showBackdrop();
     resetStampScanToIdle();
@@ -5777,20 +5981,12 @@
     document.getElementById('stampScanErrorNote').style.display = 'none';
   }
 
+  /* [2026-08-15改訂 Phase 1] 一覧表示も正本(StampStore)から作る。
+     従来は旧キー(fireflow-stamp:*)をリモートから直接読み直しており、正本と別の値が
+     一覧に出うる状態だった。 */
   async function loadStampScannedList() {
-    if (!window.storage) return;
-    try {
-      var result = await storageList(STAMP_SCAN_KEY_PREFIX, true);
-      if (!result || !result.keys) return;
-      for (var i = 0; i < result.keys.length; i++) {
-        var room = result.keys[i].slice(STAMP_SCAN_KEY_PREFIX.length);
-        try {
-          var entry = await storageGet(result.keys[i], true);
-          if (entry && entry.value) stampScannedRooms[room] = JSON.parse(entry.value);
-        } catch (err) { /* skip */ }
-      }
-      renderStampScanList();
-    } catch (err) { /* まだ何も無い */ }
+    await reloadStampStoreForCurrentProperty();
+    renderStampScanList();
   }
 
   function renderStampScanList() {
@@ -5810,11 +6006,9 @@
       btn.addEventListener('click', function(e) {
         e.stopPropagation();
         var room = btn.getAttribute('data-room');
-        delete stampScannedRooms[room];
-        delete STAMP_DATA[room];
-        try {
-          storageDelete(STAMP_SCAN_KEY_PREFIX + room, true).catch(function() {});
-        } catch (err) {}
+        // [2026-08-15改訂 Phase 1] 正本(StampStore)から削除し、表示用の派生ビューを作り直す。
+        stampStore.remove(room);
+        syncStampDataFromStore();
         initScheduleLabels();
         renderFilterChips();
         renderFloors();
@@ -5941,14 +6135,14 @@
   }
 
   function applyStampBulkResult(parsedList) {
+    // [2026-08-15追加 Phase 1] 反映はStampStore経由でまとめて行う(部屋ごとの直接代入をやめる)。
+    var pendingRecords = [];
     var savedCount = 0;
     // 2026-07-29追加(LB改善指示書④): 捺印表(点検希望時間連絡票)から読み取った部屋番号を
     // 集めておき、STAMP_DATAへの保存とは別に、部屋ロースター(FLOORS)の拡張にも使う。
-    var roomNumbersForRoster = [];
     parsedList.forEach(function(item) {
       var room = (item.room_number || '').toString().trim();
       if (!room) return;
-      roomNumbersForRoster.push(room);
       // [2026-08-09改訂、実装修正フェーズ1 Fix1] symbol('A'/'P'/'キャンセル')とtime/time_endは
       // 互いに排他ではない(公式ルール)。従来`symbol ? '' : ...`でtime/time_endを強制的に空にして
       // いたため、AM/PM区分と具体時刻が同時に記載された資料でどちらか一方が失われていた
@@ -5963,23 +6157,19 @@
       // scheduleDate/scheduleDayとして追加保存する(既存5項目の意味・型は変更しない)。
       var dateRaw = (item.date || '').toString().trim();
       var resolvedDate = resolveStampScheduleDate(dateRaw);
-      var entry = { symbol: symbol, time: time, time_end: timeEnd, time_mode: timeMode, note: note, name: name, scheduleDate: resolvedDate.scheduleDate, scheduleDay: resolvedDate.scheduleDay };
-      STAMP_DATA[room] = entry;
-      stampScannedRooms[room] = entry;
-      try {
-        storageSet(STAMP_SCAN_KEY_PREFIX + room, JSON.stringify(entry), true).catch(function() {});
-      } catch (err) {}
+      // [2026-08-15改訂 Phase 1] STAMP_DATAへ直接書かず、正本(StampStore)へ渡す。
+      pendingRecords.push({ room: room, symbol: symbol, time_start: time, time_end: timeEnd, time_mode: timeMode,
+        note: note, name: name, schedule_date: resolvedDate.scheduleDate, schedule_day: resolvedDate.scheduleDay,
+        source: 'legacy_time_request' });
       savedCount++;
     });
 
-    // 2026-07-29追加(LB改善指示書④): FLOORSにまだ存在しない部屋番号があれば、renderFloors()の
-    // 前に部屋ロースターへ追加する(既存の点検報告書からのFLOORS構築ロジックはそのまま。あくまで
-    // 追加の経路)。既存部屋のみだった場合はFLOORS/TOTAL_ROOMSに変化は無い(冪等)。
-    extendRoomRosterFromRoomNumbers(roomNumbersForRoster);
+    // [2026-08-15変更 Phase 1] 従来ここで extendRoomRosterFromRoomNumbers() を呼び、OCR結果から
+    // FLOORS(=Excel由来のMASTER)へ部屋を追加していた。MASTERはExcelを正本とし、OCRからは
+    // 生成しないという恒久ルールに反するため、この追加をやめる。MASTERに無い部屋番号は
+    // StampStore側で受け付けられず、予定情報としても入らない(誤った部屋を作らない)。
 
-    initScheduleLabels();
-    renderFilterChips();
-    renderFloors();
+    applyStampRecordsToLb(pendingRecords, 'legacy_time_request');
     renderStampScanList();
     return savedCount;
   }
@@ -6050,18 +6240,11 @@
     // scheduleDayへ正規化して追加保存する(既存5項目の意味・型は変更しない)。
     var dateRaw = ((parsed && parsed.date) || '').toString().trim();
     var resolvedDate = resolveStampScheduleDate(dateRaw);
-    var entry = { symbol: symbol, time: time, time_end: timeEnd, time_mode: timeMode, note: note, name: name, scheduleDate: resolvedDate.scheduleDate, scheduleDay: resolvedDate.scheduleDay };
-    STAMP_DATA[room] = entry;
-    stampScannedRooms[room] = entry;
-    try {
-      storageSet(STAMP_SCAN_KEY_PREFIX + room, JSON.stringify(entry), true).catch(function() {});
-    } catch (err) {}
-    // 2026-07-29追加(LB改善指示書④): applyStampBulkResult()と同様、FLOORSにまだ存在しない
-    // 部屋番号であれば部屋ロースターへ追加する(既存の戻り値・エラー挙動は変更しない)。
-    extendRoomRosterFromRoomNumbers([room]);
-    initScheduleLabels();
-    renderFilterChips();
-    renderFloors();
+    // [2026-08-15改訂 Phase 1] STAMP_DATAへ直接書かず、正本(StampStore)へ渡す。
+    // FLOORS(MASTER)への部屋追加もやめる(MASTERはExcelを正本とする)。
+    applyStampRecordsToLb([{ room: room, symbol: symbol, time_start: time, time_end: timeEnd, time_mode: timeMode,
+      note: note, name: name, schedule_date: resolvedDate.scheduleDate, schedule_day: resolvedDate.scheduleDay,
+      source: 'legacy_time_request' }], 'legacy_time_request');
     renderStampScanList();
     return room;
   }
@@ -6115,22 +6298,11 @@
     // scheduleDayへ正規化して追加保存する(既存5項目の意味・型は変更しない)。
     var dateRaw = document.getElementById('stampReviewDate').value.trim();
     var resolvedDate = resolveStampScheduleDate(dateRaw);
-    var entry = { symbol: symbol, time: time, time_end: timeEnd, time_mode: timeMode, note: note, name: name, scheduleDate: resolvedDate.scheduleDate, scheduleDay: resolvedDate.scheduleDay };
-
-    STAMP_DATA[room] = entry;
-    stampScannedRooms[room] = entry;
-    try {
-      storageSet(STAMP_SCAN_KEY_PREFIX + room, JSON.stringify(entry), true).catch(function() {});
-    } catch (err) {}
-
-    // 2026-07-29追加(LB改善指示書④): 手動レビュー保存(単発の捺印表スキャン)でも、FLOORSに
-    // まだ存在しない部屋番号であれば部屋ロースターへ追加する(既存のトースト文言・戻り値・
-    // 画面遷移は変更しない)。
-    extendRoomRosterFromRoomNumbers([room]);
-
-    initScheduleLabels();
-    renderFilterChips();
-    renderFloors();
+    // [2026-08-15改訂 Phase 1] 手入力の保存も他経路と同じ正本(StampStore)へ通す。
+    // FLOORS(MASTER)への部屋追加はやめる(MASTERはExcelを正本とする)。
+    applyStampRecordsToLb([{ room: room, symbol: symbol, time_start: time, time_end: timeEnd, time_mode: timeMode,
+      note: note, name: name, schedule_date: resolvedDate.scheduleDate, schedule_day: resolvedDate.scheduleDay,
+      source: 'manual' }], 'manual');
     renderStampScanList();
     showToast(room + '号室を保存しました。続けて次の連絡票を撮影してください。');
     resetStampScanToIdle();
@@ -6209,19 +6381,13 @@
       knownRoomNumbers: ocrScheduleKnownRoomNumbers(),
     }, { newRoomPolicy: 'skip' });
 
-    STAMP_DATA = lbResult.stampData;
+    // [2026-08-15改訂 Phase 1] 従来はSTAMP_DATAをオブジェクトごと差し替えていたため、
+    // 別経路(新捺印表等)で入った予定情報が消えることがあった。確定した部屋だけを
+    // 正本(StampStore)へマージする。
     LADDER_ROOMS = lbResult.ladderRooms;
-
-    lbResult.appliedRooms.forEach(function(rn) {
-      stampScannedRooms[rn] = STAMP_DATA[rn];
-      try {
-        storageSet(STAMP_SCAN_KEY_PREFIX + rn, JSON.stringify(STAMP_DATA[rn]), true).catch(function() {});
-      } catch (err) {}
-    });
-
-    initScheduleLabels();
-    renderFilterChips();
-    renderFloors();
+    applyStampRecordsToLb(lbResult.appliedRooms.map(function(rn) {
+      return window.FireFlowStampStore.fromLegacyEntry(rn, (lbResult.stampData || {})[rn], { source: 'legacy_schedule_sheet' });
+    }), 'legacy_schedule_sheet');
     renderStampScanList();
 
     // 2026-07-27修正(Phase7前対応バックログ⑤): 確定対象(=確認画面に表示されていた全部屋)の
@@ -6354,42 +6520,230 @@
      - FLOORSに無い部屋番号がOCRに含まれていても、FLOORSへ追加しない(unmatchedとして返す)
      - OCRに含まれない部屋(例: 捺印表に印字が無い1102)は一切触らず、stamp情報なしのまま残す
      したがってこの関数がFLOORSを書き換えることは無い。 */
+  /* [2026-08-15改訂 Phase 1] 値の確定はサーバー側(OCR→FireFlow辞書→normalize→LB変換)で
+     完了しているため、ここは「確定済みの値をStampStore(正本)へ渡す」だけにする。
+     STAMP_DATAへの直接代入・個別キーへの保存はStampStoreの責務へ移した。 */
   function applyStandardizedStampDataToLb(stampData) {
     var knownRooms = {};
     FLOORS.forEach(function(f) { f.rooms.forEach(function(r) { knownRooms[r] = true; }); });
 
-    var appliedRooms = [], unmatchedRooms = [], needsReviewRooms = [];
+    var records = [], unmatchedRooms = [];
     Object.keys(stampData || {}).forEach(function(room) {
       if (!knownRooms[room]) { unmatchedRooms.push(room); return; }
       var src = stampData[room] || {};
-      // 既存のSTAMP_DATA形状({symbol, time, time_end, note, name})に合わせつつ、新捺印表由来の
-      // 追加情報(生チェック状態・要確認フラグと理由)を後方互換で足す。symbolは変換アダプタ側で
-      // auto_confirmedのときしか値が入らないため、複数チェックの部屋がここでA/Pに化けることはない。
-      STAMP_DATA[room] = {
+      // symbolは変換アダプタ側でauto_confirmedのときしか値が入らないため、複数チェックの
+      // 部屋がここでA/Pに化けることはない(判断は一切足さない)。
+      records.push({
+        room: room,
         symbol: src.symbol || '',
-        time: src.time_start || src.time || '',
+        time_start: src.time_start || src.time || '',
         time_end: src.time_end || '',
         note: src.note || '',
-        name: '',
-        a_checked: !!src.a_checked,
-        p_checked: !!src.p_checked,
-        cancel_checked: !!src.cancel_checked,
+        // [Phase 1で追加] 読み取り原文。従来は保存対象から漏れており、再読込で失われていた。
+        note_raw: src.note_raw || '',
+        raw_checkboxes: { a: !!src.a_checked, p: !!src.p_checked, cancel: !!src.cancel_checked },
+        // [Phase 2で追加] 項目単位の要確認。「時刻は確定・備考だけ要確認」を保存・復元をまたいで
+        // そのまま持ち回るため。確定した項目は、他の項目が要確認でも捨てずに表示する。
+        symbol_review: !!src.symbol_review,
+        time_review: !!src.time_review,
+        note_review: !!src.note_review,
+        other_review: !!src.other_review,
         needs_review: !!src.needs_review,
         review_reason: Array.isArray(src.review_reason) ? src.review_reason.slice() : [],
-      };
-      appliedRooms.push(room);
-      if (STAMP_DATA[room].needs_review) needsReviewRooms.push(room);
-      stampScannedRooms[room] = STAMP_DATA[room];
-      try {
-        storageSet(STAMP_SCAN_KEY_PREFIX + room, JSON.stringify(STAMP_DATA[room]), true).catch(function() {});
-      } catch (err) { /* storage未初期化時(ローカル検証等)は保存だけスキップする */ }
+        source: 'standardized_stamp_sheet',
+      });
     });
 
-    initScheduleLabels();
-    renderFilterChips();
-    renderFloors();
+    applyStampRecordsToLb(records, 'standardized_stamp_sheet');
+    var appliedRooms = records.map(function(r) { return r.room; });
+    var needsReviewRooms = records.filter(function(r) { return r.needs_review; }).map(function(r) { return r.room; });
     return { appliedRooms: appliedRooms, unmatchedRooms: unmatchedRooms, needsReviewRooms: needsReviewRooms };
   }
+
+  /* [2026-08-13新設 新捺印表 実アップロード導線接続]
+     新捺印表の画像/PDFを選択 → /api/v1/standardized-stamp-sheet/scan（サーバー側で
+     scanStandardizedStampSheet → normalizeStandardizedStampScan → toLiveBoardStampData まで実行）
+     → applyStandardizedStampDataToLb（部屋カードへ反映）という一本道。
+     【なぜこの入口が必要か】新捺印表OCR一式はlib配下に実装済みだったが、それを呼ぶHTTP
+     エンドポイントとUIの入口が無く、実際のアップロード操作は既存Legacyの
+     /api/scan-time-request（部屋ごとに1枚の連絡票を読む別様式のOCR）だけを通っていた。 */
+  // 新捺印表OCRが受け付ける画像形式。実物の検証で使っているJPG/JPEGを必ず通すため、
+  // 拡張子違い(jpg/jpeg)や端末が付けるMIMEの揺れ(image/jpg・image/pjpeg)も許容する。
+  var STANDARDIZED_STAMP_ACCEPTED_MEDIA_TYPES = {
+    'image/jpeg': 'image/jpeg',
+    'image/jpg': 'image/jpeg',
+    'image/pjpeg': 'image/jpeg',
+    'image/png': 'image/png',
+  };
+
+  async function fetchStandardizedStampScanResult(dataUrl) {
+    var match = dataUrl.match(/^data:([^;]+);base64,(.*)$/);
+    var rawMediaType = String(match ? match[1] : 'image/jpeg').toLowerCase();
+    var base64Data = match ? match[2] : dataUrl;
+    // 受け付ける形式はJPG/JPEG/PNGのみ。APIへは正規化したMIMEタイプ(image/jpeg|image/png)で送る。
+    var mediaType = STANDARDIZED_STAMP_ACCEPTED_MEDIA_TYPES[rawMediaType];
+    if (!mediaType) {
+      throw new Error('この形式のファイルは捺印表として読み取れません（JPG・JPEG・PNGの画像を選んでください）。');
+    }
+    var mode = 'single';
+
+    var response = await fetch('/api/v1/standardized-stamp-sheet/scan', {
+      method: 'POST',
+      headers: await scanRequestHeaders(),
+      body: JSON.stringify({ mode: mode, mediaType: mediaType, data: base64Data })
+    });
+    var data = await response.json();
+    if (!response.ok || data.error) {
+      throw new Error(data.error || ('HTTPエラー ' + response.status));
+    }
+    var result = data.result;
+    if (!result || !result.stampData || typeof result.stampData !== 'object') {
+      throw new Error('想定外の形式で結果が返されました。');
+    }
+    return result;
+  }
+
+  // [2026-08-13追加 読み込み入口の一本化] 読み取り中の見出し文言を設定する。利用者に内部経路
+  // (Legacy/新OCR)の違いを見せないため、どのフローから開いても中立的な文言にする。
+  function setStampPanelTitle(text) {
+    var el = document.getElementById('stampScanPanelTitle');
+    if (el) el.textContent = text;
+  }
+
+  /* [2026-08-15追加 Phase 2 実LB最終確認②] 部屋を特定できなかった時間指定行の「読めていた内容」を、
+     利用者が原本と突き合わせられる文にする。
+     【背景(801号室で確定した消失経路)】時間指定行は、その行自身の部屋番号マスからしか部屋へ
+     結合しない(推測で隣の部屋へ割り当てない)。部屋番号マスが1マスでも確定できないと行ごと
+     未割当になるが、従来は件数しか受け取っていなかったため、同じ行で確実に読めていた時刻・
+     備考が画面にも保存にも残らず、該当部屋は「時間指定が無い部屋」と区別が付かなくなっていた。
+     ここでは値の解釈を一切変えず(部屋の推定・時刻の補完はしない)、読めたものをそのまま出す。 */
+  function describeUnassignedTimeDesignations(list) {
+    if (!Array.isArray(list) || !list.length) return '';
+    return list.map(function(row, i) {
+      row = row || {};
+      var parts = [];
+      // 表示はOCRが返した文字列を含むため、既存のescapeHtml()を必ず通す(新しい仕組みは足さない)。
+      var timeText = '';
+      if (row.time_start) timeText = row.time_start + (row.time_end ? ('〜' + row.time_end) : '');
+      else if (row.time_end) timeText = '〜' + row.time_end;
+      if (timeText) parts.push(escapeHtml(timeText));
+      // 時刻が確定できなかった行は、マスの見え方(例 "?9:30")をそのまま出す。値ではないと分かる形にする。
+      var rawTime = [row.time_start_raw, row.time_end_raw].filter(function(t) { return !!t; }).join('〜');
+      if (!timeText && rawTime) parts.push('時刻のマス「' + escapeHtml(rawTime) + '」');
+      if (row.note_raw) parts.push('備考「' + escapeHtml(String(row.note_raw)) + '」');
+      if (!parts.length) parts.push('（時刻・備考の記入は読み取れませんでした）');
+      var roomCells = row.room_number_raw
+        ? ('部屋番号のマス「' + escapeHtml(String(row.room_number_raw)) + '」')
+        : '部屋番号のマスが空欄';
+      return (i + 1) + '. ' + parts.join(' ') + '（' + roomCells + '）';
+    }).join('<br>');
+  }
+
+  async function runStandardizedStampScan(dataUrl) {
+    // 一本化した入口から直接呼ばれるため、読み取りの進行状況が見えるようにパネルを開く。
+    // 複数の読み込みボタン(#stampScanIdle)は隠したままにする。
+    setStampPanelTitle('資料を読み取っています');
+    document.getElementById('stampScanPanel').style.display = 'block';
+    showBackdrop();
+    document.getElementById('standardizedStampScanError').style.display = 'none';
+    document.getElementById('stampScanIdle').style.display = 'none';
+    document.getElementById('stampScanReview').style.display = 'none';
+    document.getElementById('stampScanBulkLoadingText').textContent = 'AIが捺印表を読み取り中です…（1枚でも数十秒かかる場合があります）';
+    document.getElementById('stampScanBulkLoading').style.display = 'block';
+    try {
+      var result = await fetchStandardizedStampScanResult(dataUrl);
+      // 【重要】新捺印表は全戸分がまとまった1枚の様式であり、この物件の希望時間の一次情報。
+      // 反映前に既存のSTAMP_DATA(冒頭のデモ値や以前の読み取り結果)を一度空にしてから
+      // 今回のOCR結果だけを入れ直す＝「置換」にする。これにより、実物件に偶然同じ部屋番号が
+      // あるだけで古いデモ値(705=10:30等)が残る、という表示崩れが構造的に起こらなくなる。
+      // 部屋一覧(FLOORS)には一切触れないため、捺印表に印字の無い部屋(例:1102)も部屋としては
+      // そのまま残り、捺印情報だけが無い状態になる。
+      clearDemoStampDataForPropertyChange();
+      var applied = applyStandardizedStampDataToLb(result.stampData);
+      document.getElementById('stampScanBulkLoading').style.display = 'none';
+      // [2026-08-15追加 Phase 2 実LB最終確認②] 部屋を特定できなかった時間指定行があるときは、
+      // パネルを閉じずに「その行で読めていた内容」を出す。3.2秒で消えるトーストの件数だけでは
+      // 見落とすうえ、どの部屋にも書き込まれない情報のため、閉じた瞬間に手掛かりが完全に
+      // 失われる(801号室で実際に起きた消失)。読めた値をそのまま見せるだけで、部屋の推定は
+      // 一切しない(誤確定は増えない)。
+      var unassignedHtml = describeUnassignedTimeDesignations(result.unassignedTimeDesignations);
+      if (unassignedHtml) {
+        setStampPanelTitle('読み取りました（原本の確認が必要な行があります）');
+        var noticeEl = document.getElementById('standardizedStampScanError');
+        noticeEl.innerHTML = '次の時間指定は、部屋番号を読み取れなかったため、どの部屋にも反映していません。'
+          + '原本を確認して、必要なら部屋カードから手入力してください。<br>' + unassignedHtml;
+        noticeEl.style.display = 'block';
+      } else {
+        closeStampScan();
+      }
+      var msg = '捺印表を読み取りました（' + applied.appliedRooms.length + '部屋分';
+      if (applied.needsReviewRooms.length) msg += '、うち要確認 ' + applied.needsReviewRooms.length + '部屋';
+      if (applied.unmatchedRooms.length) msg += '、部屋一覧に無い番号 ' + applied.unmatchedRooms.length + '件は未反映';
+      // [重要] 時間指定欄に記入はあるが部屋番号を特定できなかった行は、どの部屋にも紐付けられない
+      // ため部屋カードには現れない。黙って消すと「時間指定が無い部屋」に見えてしまい、訪問時刻を
+      // 取り違える危険があるので、件数だけは必ず知らせる(推測で部屋へ割り当てることはしない)。
+      if (result.unassignedTimeDesignationRowCount) {
+        msg += '、部屋を特定できない時間指定 ' + result.unassignedTimeDesignationRowCount + '件は未反映のため原本の確認が必要です';
+      }
+      msg += '）。';
+      showToast(msg);
+    } catch (err) {
+      document.getElementById('stampScanBulkLoading').style.display = 'none';
+      // 失敗しても、隠してある複数の読み込みボタン(#stampScanIdle)は出さない。
+      // 理由だけをこのパネル内に表示し、利用者は×で閉じてもう一度「資料を読み込む」から選び直す。
+      setStampPanelTitle('読み取りに失敗しました');
+      var errEl = document.getElementById('standardizedStampScanError');
+      errEl.textContent = '読み取りに失敗しました：' + (err && err.message ? err.message : String(err));
+      errEl.style.display = 'block';
+    }
+  }
+
+  /* [2026-08-13新設 読み込み入口の一本化]
+     「資料を読み込む」で選ばれたファイルを、内部で適切な処理へ振り分ける唯一の窓口。
+     - 画像1枚(JPG/JPEG/PNG) … 新捺印表として新OCR経路(runStandardizedStampScan)へ流す。
+       実運用で受け取る新捺印表はA4 1枚の画像であり、これが最も多い入力のため既定の扱いにする。
+     - それ以外(Excel/CSV/PDF/複数ファイル) … 既存の資料取込(資料をまとめて追加)の流れへ渡す。
+       分類の推定・解析は既存処理(guessDocumentClassification/processDocBatchDraft)がそのまま担う。
+     【重要】新捺印表(画像)を既存Legacyの /api/scan-time-request へ流さないこと。ここでの
+     振り分けが唯一の分岐点であり、画像1枚は必ず新OCR経路へ入る。 */
+  var STANDARDIZED_STAMP_IMAGE_EXTS = { jpg: true, jpeg: true, png: true };
+  var STANDARDIZED_STAMP_IMAGE_MIMES = { 'image/jpeg': true, 'image/jpg': true, 'image/png': true, 'image/pjpeg': true };
+
+  function isStandardizedStampImageFile(file) {
+    if (!file) return false;
+    var ext = extOfFileName(file.name || '');
+    // 拡張子とMIMEタイプのどちらかで判定できればよい(端末によってはtypeが空になるため)。
+    if (STANDARDIZED_STAMP_IMAGE_EXTS[ext]) return true;
+    return !!STANDARDIZED_STAMP_IMAGE_MIMES[String(file.type || '').toLowerCase()];
+  }
+
+  function routeUnifiedUpload(files) {
+    var list = Array.prototype.slice.call(files || []);
+    if (!list.length) return;
+
+    if (list.length === 1 && isStandardizedStampImageFile(list[0])) {
+      var reader = new FileReader();
+      reader.onload = function() { runStandardizedStampScan(reader.result); };
+      reader.onerror = function() { showToast('ファイルを読み込めませんでした。別のファイルでお試しください。'); };
+      reader.readAsDataURL(list[0]);
+      return;
+    }
+
+    // 画像1枚以外は、従来どおりの資料取込(分類を確認してから解析)へ。
+    openDocBatchUploadDialog();
+    addFilesToDocBatch(list);
+  }
+
+  document.getElementById('uploadChoiceUnified').addEventListener('click', function() {
+    document.getElementById('uploadChoiceDialog').style.display = 'none';
+    hideBackdrop();
+    document.getElementById('unifiedUploadInput').click();
+  });
+  document.getElementById('unifiedUploadInput').addEventListener('change', function(e) {
+    var files = Array.prototype.slice.call(e.target.files || []);
+    e.target.value = '';
+    routeUnifiedUpload(files);
+  });
 
   window.__ffOcrConfirmTestBridge = {
     getRoomNumbers: function() {
@@ -6404,11 +6758,11 @@
         ladderRooms: LADDER_ROOMS,
         knownRoomNumbers: this.getRoomNumbers(),
       });
-      STAMP_DATA = lbResult.stampData;
+      // [2026-08-15改訂 Phase 1] テスト用ブリッジも本番と同じ正本(StampStore)を通す。
       LADDER_ROOMS = lbResult.ladderRooms;
-      initScheduleLabels();
-      renderFilterChips();
-      renderFloors();
+      applyStampRecordsToLb(lbResult.appliedRooms.map(function(rn) {
+        return window.FireFlowStampStore.fromLegacyEntry(rn, (lbResult.stampData || {})[rn], { source: 'legacy_schedule_sheet' });
+      }), 'legacy_schedule_sheet');
       return lbResult;
     },
     // 2026-07-27追加(Phase7前対応バックログ⑤のテスト橋渡し): 「点検予定表を読み取る」画面を
@@ -9105,6 +9459,11 @@
     currentHomeMode = 'normal';
     activeFilter = null;
 
+    // [2026-08-15追加 Phase 1] 物件(MASTER)が入れ替わったので、その物件スコープの予定情報を
+    // 保存先から復元する。従来はここで消去するだけで復元しなかったため、捺印表を読み取って
+    // 表示された後にExcelを読み直すと、保存済みなのに画面から予定が消えていた。
+    reloadStampStoreForCurrentProperty();
+
     initScheduleLabels();
     renderFilterChips();
     document.querySelector('.building').textContent = buildingName;
@@ -9904,9 +10263,11 @@
   document.getElementById('docBatchSelectBtn').addEventListener('click', function() {
     document.getElementById('docBatchUploadInput').click();
   });
-  document.getElementById('docBatchUploadInput').addEventListener('change', function(e) {
-    var files = Array.prototype.slice.call(e.target.files || []);
-    files.forEach(function(file) {
+  // [2026-08-13切り出し 読み込み入口の一本化] 選択されたファイルを資料取込の一覧へ追加する。
+  // 一本化した入口(routeUnifiedUpload)と、既存の#docBatchUploadInputの両方から呼ぶ。
+  // 中身は従来の#docBatchUploadInputのchangeハンドラそのままで、挙動は変えていない。
+  function addFilesToDocBatch(files) {
+    Array.prototype.slice.call(files || []).forEach(function(file) {
       var ext = extOfFileName(file.name);
       DOC_BATCH_DRAFTS.push({
         id: docBatchGenId(),
@@ -9920,6 +10281,10 @@
       });
     });
     renderDocBatchFileList();
+  }
+
+  document.getElementById('docBatchUploadInput').addEventListener('change', function(e) {
+    addFilesToDocBatch(e.target.files);
     e.target.value = '';
   });
   document.getElementById('docBatchUploadClose').addEventListener('click', closeDocBatchUploadDialog);
@@ -10400,10 +10765,12 @@
       };
       count++;
     }
-    STAMP_DATA = newStampData;
-    initScheduleLabels();
-    renderFilterChips();
-    renderFloors();
+    // [2026-08-15改訂 Phase 1] 従来はSTAMP_DATAを丸ごと差し替えたうえ永続化していなかったため、
+    // 他経路の予定情報を消し、かつ再読込で自身も消えていた。他経路と同じ正本(StampStore)へ
+    // 保存する(MASTERに無い部屋は受け付けない)。
+    applyStampRecordsToLb(Object.keys(newStampData).map(function(room) {
+      return window.FireFlowStampStore.fromLegacyEntry(room, newStampData[room], { source: 'csv_import' });
+    }), 'csv_import');
     showToast('点検希望時間連絡票を読み込みました（' + count + '部屋分）。');
   }
 

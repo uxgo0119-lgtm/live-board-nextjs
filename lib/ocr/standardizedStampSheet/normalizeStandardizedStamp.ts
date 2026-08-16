@@ -5,8 +5,8 @@
 // (StandardizedStampNormalizedEntry)へ変換する、新経路の正規化パイプライン本体。
 
 import { convergeSymbol } from './symbolConvergence';
-import { matchAgainstDictionaries } from './misreadDictionary';
-import { parseGridTime, blankGridTime } from './gridTimeParser';
+import { blankMisreadMatch } from './misreadDictionary';
+import { blankGridTime } from './gridTimeParser';
 import { parseRawScanRooms, parseTimeDesignationRawRows } from './parseRawScanResult';
 import { joinTimeDesignationRows } from './timeDesignation';
 import type {
@@ -21,75 +21,28 @@ export type NormalizeStandardizedStampOptions = {
   parseIssues?: string[];
 };
 
-export function normalizeStandardizedStampEntry(
-  rawEntry: StandardizedStampRawEntry,
-  options: NormalizeStandardizedStampOptions = {}
-): StandardizedStampNormalizedEntry {
-  const resolvedSymbol = convergeSymbol(rawEntry.raw_checkboxes, options);
-  const timeStart = parseGridTime(rawEntry.time_start_raw);
-  const timeEnd = parseGridTime(rawEntry.time_end_raw);
-  const noteMisreadMatch = matchAgainstDictionaries(rawEntry.note_raw);
-
-  const needsReviewReasons: string[] = [];
-  if (resolvedSymbol.state === 'needs_review') {
-    needsReviewReasons.push('SYMBOL:' + (resolvedSymbol.reason ?? 'UNKNOWN'));
-  }
-  if (!timeStart.ok) {
-    needsReviewReasons.push('TIME_START:' + (timeStart.reason ?? 'UNKNOWN'));
-  }
-  if (!timeEnd.ok) {
-    needsReviewReasons.push('TIME_END:' + (timeEnd.reason ?? 'UNKNOWN'));
-  }
-  if (rawEntry.note_raw.trim() && noteMisreadMatch.state !== 'auto_correct') {
-    needsReviewReasons.push('NOTE:' + noteMisreadMatch.state.toUpperCase());
-  }
-  if (options.parseIssues && options.parseIssues.length > 0) {
-    for (const issue of options.parseIssues) {
-      needsReviewReasons.push('PARSE_ISSUE:' + issue);
-    }
-  }
-
-  return {
-    room_number: rawEntry.room_number,
-    raw_checkboxes: rawEntry.raw_checkboxes,
-    resolved_symbol: resolvedSymbol,
-    time_start: timeStart,
-    time_end: timeEnd,
-    note_raw: rawEntry.note_raw,
-    note_misread_match: noteMisreadMatch,
-    needsReview: needsReviewReasons.length > 0,
-    needsReviewReasons,
-  };
-}
-
-export function normalizeStandardizedStampEntries(
-  rawEntries: StandardizedStampRawEntry[],
-  options: NormalizeStandardizedStampOptions = {}
-): StandardizedStampNormalizedEntry[] {
-  return rawEntries.map((entry) => normalizeStandardizedStampEntry(entry, options));
-}
-
-// [非推奨 / 2026-08-13] 本体グリッドの行に時刻が含まれている前提の旧経路。
-// 実API検証で、この形だと(1) 空マスの0補完を検知できない (2) 時間指定が隣接部屋へ
-// 割り当てられても検知できない、という2つの誤確定が起きることが判明した。
-// 新しい呼び出し元は normalizeStandardizedStampScan() を使うこと。
-export function normalizeStandardizedStampScanResult(
-  rooms: unknown[],
-  options: Omit<NormalizeStandardizedStampOptions, 'parseIssues'> = {}
-): { entries: StandardizedStampNormalizedEntry[]; skipped: string[] } {
-  const { entries: parsedEntries, skipped } = parseRawScanRooms(rooms);
-  const normalizedEntries = parsedEntries.map(({ entry, parseIssues }) =>
-    normalizeStandardizedStampEntry(entry, { ...options, parseIssues })
-  );
-  return { entries: normalizedEntries, skipped };
-}
-
 // ---------------------------------------------------------------------------
-// [2026-08-13新設 実API検証フェーズ] 本体グリッドと時間指定エリアを分けて扱う新経路。
+// [2026-08-13新設 実API検証フェーズ] 本体グリッドと時間指定エリアを分けて扱う経路。
+//
+// [2026-08-15 Phase 2] ここにあった旧経路(normalizeStandardizedStampEntry /
+// normalizeStandardizedStampEntries / normalizeStandardizedStampScanResult)は削除した。
+// 本体グリッドの行に時刻・備考が入っている前提の実装で、実API検証により
+//  (1) 空マスの0補完を検知できない (2) 時間指定が隣接部屋へ割り当てられても検知できない
+// ことが判明して以降どこからも呼ばれておらず、しかしFireFlow辞書(matchAgainstDictionaries)を
+// 呼ぶ2つ目の場所として残っていた。辞書の適用箇所を正式パイプライン内の1箇所
+// (timeDesignation の備考)だけにするため、経路ごと落としている。
 // ---------------------------------------------------------------------------
 
 function stripLeadingZeros(roomNumber: string): string {
   return roomNumber.replace(/^0+/, '');
+}
+
+// 要確認理由へ添える「マスの見え方」。値の復元には使わない、人が読むためだけの補足。
+// 理由文字列は接頭辞(TIME_START: 等)で項目へ振り分けられるため、末尾に足しても分類は変わらない。
+function rawCellHint(raw: string): string {
+  const text = (raw ?? '').trim();
+  if (!text || text.includes('|')) return '';
+  return '(' + text + ')';
 }
 
 // 本体グリッドの行(部屋番号+A/P/キャンセルのみ)を正規化する。時刻・備考はここでは扱わず、
@@ -124,7 +77,7 @@ function normalizeGridRoomEntry(
     time_start: blankGridTime(),
     time_end: blankGridTime(),
     note_raw: '',
-    note_misread_match: matchAgainstDictionaries(''),
+    note_misread_match: blankMisreadMatch(),
     needsReview: needsReviewReasons.length > 0,
     needsReviewReasons,
     time_source_row_index: null,
@@ -171,9 +124,13 @@ export function normalizeStandardizedStampScan(
   const { rows, unassigned } = joinTimeDesignationRows(entries, rawRows);
 
   // 結合後に、時刻・備考起因のneeds_reviewを各エントリへ反映する。
+  // [2026-08-15追加] 理由には、確定できなかったマスの見え方(例: "9?:30")も添える。
+  // 実LBでは要確認バッジの説明(title)としてそのまま表示・保存されるため、次に同じ症状が出た
+  // ときに「モデルが何を返したせいで確定できなかったのか」を、再スキャンせずに特定できる
+  // (絶対ルール8「推測で原因確定しない」を、実LB側だけで満たせるようにするため)。
   for (const e of entries) {
-    if (!e.time_start.ok) e.needsReviewReasons.push('TIME_START:' + (e.time_start.reason ?? 'UNKNOWN'));
-    if (!e.time_end.ok) e.needsReviewReasons.push('TIME_END:' + (e.time_end.reason ?? 'UNKNOWN'));
+    if (!e.time_start.ok) e.needsReviewReasons.push('TIME_START:' + (e.time_start.reason ?? 'UNKNOWN') + rawCellHint(e.time_start.raw));
+    if (!e.time_end.ok) e.needsReviewReasons.push('TIME_END:' + (e.time_end.reason ?? 'UNKNOWN') + rawCellHint(e.time_end.raw));
     if (e.note_raw.trim() && e.note_misread_match.state !== 'auto_correct') {
       e.needsReviewReasons.push('NOTE:' + e.note_misread_match.state.toUpperCase());
     }

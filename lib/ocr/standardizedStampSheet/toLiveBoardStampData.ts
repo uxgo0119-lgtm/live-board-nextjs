@@ -19,7 +19,12 @@
 // 既存の点検希望時間連絡票OCR(residentTimeRequestSheet)・ocr_confirm経路のデータ形状は
 // 一切変更しない。
 
-import type { StandardizedStampNormalizedEntry, StandardizedStampNormalizedResult } from './types';
+import { classifyReviewReasons } from './fieldReview';
+import type {
+  StandardizedStampNormalizedEntry,
+  StandardizedStampNormalizedResult,
+  StandardizedStampTimeDesignationRow,
+} from './types';
 
 export type LiveBoardStampEntry = {
   room_number: string;
@@ -38,8 +43,46 @@ export type LiveBoardStampEntry = {
   note: string;
   // 読み取った備考の原文(未確定でも失わないために保持する。表示には使わない)。
   note_raw: string;
+  // [2026-08-15追加 Phase 2 項目単位の確定] どの項目が要確認なのかを、部屋単位の
+  // needs_review とは別に持つ。「時刻は確定・備考だけ要確認」を後段(保存・復元・描画・
+  // 運用判断)がそのまま扱えるようにするため。一部が要確認でも、確定した項目は捨てない。
+  symbol_review: boolean;
+  time_review: boolean;
+  note_review: boolean;
+  // 上のどれにも当てはまらない要確認理由(部屋番号の桁・重複行・解析エラー等)。
+  other_review: boolean;
+  // 部屋としての要確認(上のいずれかが真)。既存の表示・件数はこれを使う。
   needs_review: boolean;
   review_reason: string[];
+};
+
+// [2026-08-15追加 Phase 2 実LB最終確認②] 部屋を特定できなかった時間指定行のうち、
+// 「その行で確かに読めた内容」だけを、値の解釈を一切変えずに持ち出すための形。
+//
+// 【なぜ必要か(801号室で確定した消失経路)】
+// 時間指定行は、その行自身の部屋番号マスからしか部屋へ結合しない(推測で隣の部屋へ割り当てない)。
+// そのため部屋番号マスが1マスでも確定できない行は unassigned となるが、従来はここで
+// **行の中身を件数(number)へ潰していた**ため、同じ行で確実に読めていた開始時刻・備考が
+// Canonical生成の時点で消え、保存にも描画にも残らなかった。該当部屋には痕跡すら付かない
+// (時刻が「記入なし」と同じ状態になるため要確認にもならない)ので、利用者からは
+// 「その部屋には時間指定が無い」ようにしか見えず、原本を確認する手掛かりも失われていた。
+//
+// 【この型がしないこと】部屋の推定・時刻の補完・備考の正規化は一切しない。読めた値と
+// 「マスの見え方」をそのまま運ぶだけで、どの部屋にも書き込まない(誤確定は増えない)。
+export type UnassignedTimeDesignation = {
+  row_index: number | null;
+  // 部屋番号マスの見え方(空マスは'_'、判読不能は'?')。値の復元には使わない、人が読むための情報。
+  room_number_raw: string;
+  // 確定できた時刻のみ。確定できなければ空文字(0補完はしない)。
+  time_start: string;
+  time_end: string;
+  // 確定できなかった場合のマスの見え方(例 "?9:30")。原本と突き合わせるための手掛かり。
+  time_start_raw: string;
+  time_end_raw: string;
+  // 読み取った備考の原文(辞書で確定できたかに関わらず、そのまま運ぶ)。
+  note_raw: string;
+  // 結合できなかった理由(部屋番号マスの判読不能・行位置の不整合など)。
+  reasons: string[];
 };
 
 export type LiveBoardStampDataResult = {
@@ -50,16 +93,32 @@ export type LiveBoardStampDataResult = {
   skippedRooms: Array<{ room_number: string; reason: string }>;
   // 部屋を特定できなかった時間指定行(人手確認が必要)。
   unassignedTimeDesignationRowCount: number;
+  // 同じ行で「読めていた内容」。件数だけでは原本のどの行かも分からないため必ず添える。
+  unassignedTimeDesignations: UnassignedTimeDesignation[];
 };
+
+function toUnassignedTimeDesignation(row: StandardizedStampTimeDesignationRow): UnassignedTimeDesignation {
+  return {
+    row_index: row.row_index ?? null,
+    room_number_raw: row.room_number.raw ?? '',
+    time_start: row.start_time.ok && row.start_time.value ? row.start_time.value : '',
+    time_end: row.end_time.ok && row.end_time.value ? row.end_time.value : '',
+    time_start_raw: row.start_time.ok ? '' : (row.start_time.raw ?? ''),
+    time_end_raw: row.end_time.ok ? '' : (row.end_time.raw ?? ''),
+    note_raw: row.remarks_raw ?? '',
+    reasons: Array.isArray(row.reasons) ? row.reasons.slice() : [],
+  };
+}
 
 function toEntryList(input: StandardizedStampNormalizedResult | StandardizedStampNormalizedEntry[]): {
   entries: StandardizedStampNormalizedEntry[];
-  unassignedCount: number;
+  unassigned: UnassignedTimeDesignation[];
 } {
-  if (Array.isArray(input)) return { entries: input, unassignedCount: 0 };
+  if (Array.isArray(input)) return { entries: input, unassigned: [] };
+  const rows = Array.isArray(input.unassignedTimeDesignationRows) ? input.unassignedTimeDesignationRows : [];
   return {
     entries: input.entries ?? [],
-    unassignedCount: Array.isArray(input.unassignedTimeDesignationRows) ? input.unassignedTimeDesignationRows.length : 0,
+    unassigned: rows.map(toUnassignedTimeDesignation),
   };
 }
 
@@ -73,6 +132,9 @@ export function toLiveBoardStampEntry(entry: StandardizedStampNormalizedEntry): 
 
   const noteConfirmed = entry.note_raw.trim() && entry.note_misread_match.state === 'auto_correct' ? entry.note_raw : '';
 
+  // 積まれた要確認理由を項目へ振り分ける。判定はここでしない(既に上流で終わっている)。
+  const fieldReview = classifyReviewReasons(entry.needsReviewReasons);
+
   return {
     room_number: entry.room_number,
     symbol,
@@ -84,6 +146,10 @@ export function toLiveBoardStampEntry(entry: StandardizedStampNormalizedEntry): 
     time: timeStart,
     note: noteConfirmed,
     note_raw: entry.note_raw,
+    symbol_review: fieldReview.symbol,
+    time_review: fieldReview.time,
+    note_review: fieldReview.note,
+    other_review: fieldReview.other,
     needs_review: entry.needsReview,
     review_reason: entry.needsReviewReasons.slice(),
   };
@@ -92,7 +158,7 @@ export function toLiveBoardStampEntry(entry: StandardizedStampNormalizedEntry): 
 export function toLiveBoardStampData(
   input: StandardizedStampNormalizedResult | StandardizedStampNormalizedEntry[]
 ): LiveBoardStampDataResult {
-  const { entries, unassignedCount } = toEntryList(input);
+  const { entries, unassigned } = toEntryList(input);
 
   const stampData: Record<string, LiveBoardStampEntry> = {};
   const needsReviewRooms: string[] = [];
@@ -124,5 +190,11 @@ export function toLiveBoardStampData(
     if (lbEntry.needs_review) needsReviewRooms.push(room);
   }
 
-  return { stampData, needsReviewRooms, skippedRooms, unassignedTimeDesignationRowCount: unassignedCount };
+  return {
+    stampData,
+    needsReviewRooms,
+    skippedRooms,
+    unassignedTimeDesignationRowCount: unassigned.length,
+    unassignedTimeDesignations: unassigned,
+  };
 }

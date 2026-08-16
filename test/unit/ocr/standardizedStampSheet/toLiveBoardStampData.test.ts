@@ -71,20 +71,36 @@ function timeRow(rowIndex: number, roomCells: string[], start: string[], end: st
   assert(Object.keys(stampData).every((r) => stampData[r].needs_review === false), '確定できた行は要確認にしない');
 }
 
-// --- 空マスの時刻は入れず、要確認のまま残す(1101/801) ---
+// --- [2026-08-14更新 最小修正] 「時」十の位のみ空欄(1101/801)は09:30として確定・反映される ---
 {
   const scan = {
     rooms: [gridRoom('1101', 'A'), gridRoom('801', 'A')],
     time_designation_rows: [
-      timeRow(1, ['1', '1', '0', '1'], ['', '9', '3', '0'], ['', '', '', '']),
+      // [2026-08-14更新 実データ準拠] 実APIは同じ「9:30」でも 1101号室=['9','','3','0']、
+      // 801号室=['','9','3','0'] と、数字が入るマスがブレて返す。実測どおりの並びで通す。
+      timeRow(1, ['1', '1', '0', '1'], ['9', '', '3', '0'], ['', '', '', '']),
       timeRow(2, ['', '8', '0', '1'], ['', '9', '3', '0'], ['', '', '', ''], '朝一'),
     ],
   };
   const { stampData } = toLiveBoardStampData(normalizeStandardizedStampScan(scan));
-  assert(stampData['1101'].time_start === '' && stampData['1101'].time === '', '1101の時刻は確定しない');
-  assert(stampData['801'].time_start === '' , '801の時刻は確定しない');
-  assert(stampData['1101'].needs_review === true && stampData['801'].needs_review === true, '両室とも要確認');
+  assert(stampData['1101'].time_start === '09:30' && stampData['1101'].time === '09:30', '1101=09:30で確定・LB互換キーにも反映');
+  assert(stampData['801'].time_start === '09:30', '801=09:30で確定');
+  assert(stampData['801'].note === '朝一', '801の備考「朝一」もLBへ反映される');
+  assert(stampData['1101'].needs_review === false && stampData['801'].needs_review === false, '両室とも要確認は解除される');
   assert(stampData['1101'].symbol === 'A' && stampData['801'].symbol === 'A', '記号自体は確定できているので維持する');
+}
+
+// --- 回帰: 「分」欄に空欄がある場合は、従来通り確定せず要確認のまま残す ---
+// 1桁として扱ってよいのは「時」欄だけ(分は常に2桁で記入される)。
+{
+  const scan = {
+    rooms: [gridRoom('1101', 'A')],
+    time_designation_rows: [timeRow(1, ['1', '1', '0', '1'], ['', '9', '3', ''], ['', '', '', ''])],
+  };
+  const { stampData } = toLiveBoardStampData(normalizeStandardizedStampScan(scan));
+  assert(stampData['1101'].time_start === '' && stampData['1101'].time === '', '分が欠けていれば時刻は確定しない');
+  assert(stampData['1101'].needs_review === true, '要確認のまま');
+  assert(stampData['1101'].symbol === 'A', '記号自体は確定できているので維持する');
 }
 
 // --- 備考は辞書一致したものだけ確定。誤読候補は原文のみ保持 ---
@@ -105,9 +121,12 @@ function timeRow(rowIndex: number, roomCells: string[], start: string[], end: st
   const { stampData } = toLiveBoardStampData(normalized);
   assert(stampData['801'].note === '', '誤読候補の備考は確定しない');
   assert(stampData['801'].needs_review === true, '要確認');
-  assert(stampData['801'].review_reason.some((r) => r.includes('REMARKS')), '備考が理由に含まれる');
-  // 未確定の行は部屋エントリへ一切書き込まないため、原文は時間指定行(未割当)側に残る。
-  assert(normalized.unassignedTimeDesignationRows[0].remarks_raw === '斡一', '原文は未割当行に保持される');
+  assert(stampData['801'].review_reason.some((r) => r.startsWith('NOTE:')), '備考が理由に含まれる');
+  // [2026-08-15更新] 備考が未確定でも、時刻は独立に確定して部屋へ入る(巻き添えで消さない)。
+  // 備考の原文は部屋エントリ側に保持され、確定していないためnoteには出さない。
+  assert(stampData['801'].time_start === '09:30', '備考が未確定でも時刻は残る');
+  assert(stampData['801'].note_raw === '斡一', '備考の原文は部屋エントリに保持される');
+  assert(normalized.unassignedTimeDesignationRows.length === 0, '部屋を特定できているので未割当にはしない');
 }
 
 // --- 重複room_numberはstampDataへ入れない ---

@@ -26,3 +26,25 @@ next-env.d.ts
 # 比較レポートには捺印表の読み取り結果(部屋番号・時刻等)が含まれるため、誤ってコミット
 # されないようにする(氏名はレポート上デフォルトで伏字化されるが、それでも念のため)。
 /ocr-compare-reports/
+
+# [2026-08-15追加] 複数物件一括OCR検証(npm run validate:batch)の出力先。
+# レポートには捺印表の読み取り結果(部屋番号・時刻・備考)が含まれるため、
+# ocr-compare-reports と同じ扱いでGit管理しない。
+/stamp-batch-reports/
+
+# [2026-08-15追加] Claude Codeのローカル権限設定。個人環境(ホームディレクトリの絶対パス等)を
+# 含むためGit管理しない。FireFlowの恒久運用ルール自体は docs/ 側を正本とする。
+/.claude/settings.local.json
+
+# [2026-08-15追加] 無人実行ランナー(./fireflow-ai-run)の実行ログ。
+# 実行中のコード断片や読み取り結果が含まれうるためGit管理しない。
+/logs/
+
+# FireFlow local-only files
+/docs/current_task.md
+/fireflow-runner.settings.json
+/test/fixtures/standardizedStampSheet/cases/prop13_20260814.json
+/test/fixtures/standardizedStampSheet/real_scan_prop13_20260814.json
+/test/trace/
+
+/test/unit/ocr/standardizedStampSheet/realScanToCanonical.test.ts

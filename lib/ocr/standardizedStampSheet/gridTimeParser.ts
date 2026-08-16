@@ -16,6 +16,29 @@
 // そこで、マス単位の配列(cells)を受け取る parseGridTimeCells() を新設し、時間指定エリアの
 // 経路はこちらのみを使う。文字列表現ではなくマスの空/埋を一次情報として判定するため、
 // モデルが補完した文字列を同時に返してきても、空マスがある限り確定されない。
+//
+// [2026-08-14改訂 最小修正 / 実画像1枚の実API検証で一般化] 「時」欄は[十の位][一の位]の
+// 2マスで、1桁の時刻は片方のマスだけに数字が書かれる(帳票の表記慣習)。実物1枚の実API検証
+// では、紙面上は同じ「9:30」の記入でも、801号室は ['','9','3','0']、1101号室は
+// ['9','','3','0'] と、数字がどちらのマスに入るかがブレて返ってきた(記入位置とモデルの
+// マス割り当ての揺れ)。そこで確定条件を「先頭マスのみ空欄」ではなく、
+//   「時」欄2マスのうち片方だけが空欄 + もう片方が数字 + 「分」欄2マスが両方とも数字
+// とする。2桁の時刻は必ず「時」欄2マスとも数字になるため、この形は1桁の時刻以外にあり得ず、
+// 読めた1文字をそのまま「時」として扱うことは推測ではない(空マス=桁が無い、という帳票構造の
+// 解釈)。「分」は常に2桁で記入されるため、「分」欄に空欄があれば従来通り確定しない。
+//
+// [2026-08-15改訂 Phase 2 実LB最終確認] 区切り記号':'を「マスの境界」として使う。
+// モデルは帳票に印字された区切り記号を配列の要素として返してくることがあり(2026-08-13実測)、
+// 「時」が2桁のときは ['1','0',':','0','0'] と5要素になるため、':'を除けば4マス揃って
+// 従来どおり確定できていた。しかし「時」が1桁のときは ['9',':','3','0'] と4要素で返るため、
+// ':'を除くと3マスになり「桁数不足」として確定できなかった(2026-08-13時点の判断。当時は
+// 1桁の「時」を確定する規則そのものが無かった)。
+// ':'は「時」欄と「分」欄の間に印字された境界なので、その前後で配列を分ければ、どの要素が
+// 「時」でどの要素が「分」なのかは位置として確定する。前が1マスなら1桁の「時」であり、
+// これは上の[2026-08-14改訂]と全く同じ「空マス=桁が無い」の解釈である。したがって
+//   区切り記号がちょうど1つ + 前が1〜2マス + 後ろが2マスとも数字
+// のときに限り確定する。分側に空欄・判読不能がある場合、時側が全て空欄の場合は従来どおり
+// 確定しない(桁を推測で作らない)。
 import type { GridTimeReadResult } from './types';
 
 const STRICT_HHMM_RE = /^([01]\d|2[0-3]):([0-5]\d)$/;
@@ -97,8 +120,52 @@ export function parseGridTimeCells(input: unknown): GridTimeReadResult {
   if (cells.some((c) => c === ILLEGIBLE_PLACEHOLDER)) {
     return { value: null, raw, ok: false, reason: 'ILLEGIBLE_DIGIT', cells };
   }
+  // [2026-08-15追加 Phase 2 実LB最終確認] 区切り記号を境界として使う経路。
+  // ここへ来るのは「区切りを除くと4マスに満たない」形だけ(4マス揃う形は下の従来経路が
+  // そのまま扱う)なので、これまで確定できずneeds_reviewへ倒れていたケースだけが対象になる。
+  const separatorCount = raw0.cells.filter((c) => c === SEPARATOR_CELL).length;
+  if (separatorCount === 1 && cells.length < TIME_CELL_COUNT) {
+    const separatorIndex = raw0.cells.indexOf(SEPARATOR_CELL);
+    const hourPart = raw0.cells.slice(0, separatorIndex);
+    const minutePart = raw0.cells.slice(separatorIndex + 1);
+    const hourDigits = hourPart.filter((c) => !isBlankCell(c));
+    if (hourPart.length <= 2 && hourDigits.length >= 1 && minutePart.length === 2 && !minutePart.some(isBlankCell)) {
+      const hour = hourDigits.length === 1 ? '0' + hourDigits[0] : hourDigits[0] + hourDigits[1];
+      const assembled = hour + ':' + minutePart[0] + minutePart[1];
+      // 監査用のrawは、区切り記号を含む「モデルが返したままの並び」を保持する(補完前の姿)。
+      const rawWithSeparator = raw0.cells.map((c) => (isBlankCell(c) ? ILLEGIBLE_PLACEHOLDER : c)).join('');
+      if (!STRICT_HHMM_RE.test(assembled)) {
+        return { value: null, raw: rawWithSeparator, ok: false, reason: 'INVALID_FORMAT', cells };
+      }
+      return { value: assembled, raw: rawWithSeparator, ok: true, cells };
+    }
+  }
+  // [2026-08-14改訂 最小修正] 1桁の「時」の確定。「時」欄2マスのうち片方だけが空欄で、
+  // もう片方が数字、かつ「分」欄2マスが両方とも数字のときに限り、その1文字を1桁の時として
+  // 確定する(空マスの位置が十の位側・一の位側のどちらでも同じ扱い)。実データでは同じ記入でも
+  // どちらのマスに数字が入るかがブレるため、位置ではなく「時欄に数字が1つだけある」という
+  // 構造で判定する。分側に空欄がある場合・時欄が両方空欄の場合は、従来通りMISSING_CELLの
+  // ままneeds_reviewへ倒す(桁を推測で作らない)。
+  const hourCells = cells.slice(0, 2);
+  const minuteCells = cells.slice(2, TIME_CELL_COUNT);
+  if (
+    cells.length === TIME_CELL_COUNT &&
+    hourCells.filter(isBlankCell).length === 1 &&
+    !minuteCells.some(isBlankCell)
+  ) {
+    const hourDigit = hourCells.find((c) => !isBlankCell(c)) as string;
+    const filled = ['0', hourDigit, minuteCells[0], minuteCells[1]];
+    if (filled.some((c) => !/^[0-9]$/.test(c))) {
+      return { value: null, raw, ok: false, reason: 'INVALID_FORMAT', cells };
+    }
+    const assembledFilled = filled[0] + filled[1] + ':' + filled[2] + filled[3];
+    if (!STRICT_HHMM_RE.test(assembledFilled)) {
+      return { value: null, raw, ok: false, reason: 'INVALID_FORMAT', cells };
+    }
+    return { value: assembledFilled, raw, ok: true, cells };
+  }
   if (cells.some(isBlankCell)) {
-    // ここが1101号室・801号室(「時」の十の位が空白)の経路。推測で埋めずneeds_reviewへ倒す。
+    // 上記の「先頭マスのみ空欄」以外の空欄パターン。推測で埋めずneeds_reviewへ倒す。
     return { value: null, raw, ok: false, reason: 'MISSING_CELL', cells };
   }
   if (malformed || cells.length !== TIME_CELL_COUNT) {
@@ -129,27 +196,7 @@ export function blankGridTime(): GridTimeReadResult {
   return { value: null, raw: '', ok: true, cells: null };
 }
 
-// [非推奨 / 2026-08-13] 文字列だけを受け取る旧経路。モデル側での0補完を検知できないため、
-// 時間指定エリアの処理には使わないこと(parseGridTimeCells を使う)。既存の呼び出し元との
-// 互換のためだけに残している。
-export function parseGridTime(raw: string): GridTimeReadResult {
-  const trimmed = (raw ?? '').trim();
-
-  if (!trimmed) {
-    return { value: null, raw: trimmed, ok: true };
-  }
-
-  if (trimmed.includes(ILLEGIBLE_PLACEHOLDER)) {
-    return { value: null, raw: trimmed, ok: false, reason: 'ILLEGIBLE_DIGIT' };
-  }
-
-  if (trimmed.length < 4) {
-    return { value: null, raw: trimmed, ok: false, reason: 'INCOMPLETE' };
-  }
-
-  if (!STRICT_HHMM_RE.test(trimmed)) {
-    return { value: null, raw: trimmed, ok: false, reason: 'INVALID_FORMAT' };
-  }
-
-  return { value: trimmed, raw: trimmed, ok: true };
-}
+// [2026-08-15 Phase 2] 文字列だけを受け取る旧経路 parseGridTime() は削除した。
+// モデル側での0補完(空マスを勝手に"0"で埋めた"09:30")を文字列からは検知できず、
+// 実API検証で1101・801の誤確定を招いた実装であり、2026-08-13以降どこからも呼ばれていない。
+// 時刻の確定は必ずマス単位の parseGridTimeCells() を通す。

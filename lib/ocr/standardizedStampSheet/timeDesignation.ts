@@ -202,11 +202,36 @@ export function joinTimeDesignationRows(
       }
     }
 
-    if (!item.startTime.ok) reasons.push('TIME_START:' + (item.startTime.reason ?? 'UNKNOWN'));
-    if (!item.endTime.ok) reasons.push('TIME_END:' + (item.endTime.reason ?? 'UNKNOWN'));
-    if (item.remarks && item.remarksMatch.state !== 'auto_correct') reasons.push('REMARKS:' + item.remarksMatch.state.toUpperCase());
+    // ここまでに積んだ reasons は、すべて「この行をどの部屋へ結び付けるか」に関わるもの
+    // (部屋番号の読み取り・行位置・重複)であり、結合そのものの可否を決める。
+    const linkable = reasons.length === 0 && target !== null;
 
-    const confirmed = reasons.length === 0 && target !== null;
+    // [2026-08-15改訂 Phase 2 項目単位の確定] 時刻・備考の未確定は、行を部屋へ結び付けられるか
+    // とは無関係なので、結合可否(linkable)には合算しない。
+    //
+    // 従来は confirmed = (全理由が空) としていたため、次の2つの取りこぼしが構造的に起きていた。
+    //  (1) 備考が辞書に無い語で返ってきただけで、独立に確定できていた時刻まで破棄される
+    //      (実LBで801号室が「開始9:30のマスは全て明確に読めている」のに記号Aだけになった)
+    //  (2) 開始と終了の一方が読めないと、明確に読めていたもう一方まで破棄される
+    //      (例: 705の「13:00〜14:00」で終了マスが1文字判読不能なら、開始13:00ごと消える)
+    // FireFlowの原則は「誤確定は防ぐ / しかし正しく読めた情報は絶対に途中で捨てない」なので、
+    // 部屋へ結び付けられた行は、項目ごとに確定した分だけを書き込む。
+    //
+    // 【誤確定が増えない理由】書き込む値は解析結果(GridTimeReadResult)そのものであり、
+    // 確定できなかった項目は value:null / ok:false のまま渡る。後段(toLiveBoardStampData)は
+    // ok のときしか表示値を作らないため、読めていない時刻が部屋カードに出ることはない。
+    // 未確定であることは、その部屋の要確認理由として必ず後段へ伝わる。
+    const timeReasons: string[] = [];
+    if (!item.startTime.ok) timeReasons.push('TIME_START:' + (item.startTime.reason ?? 'UNKNOWN'));
+    if (!item.endTime.ok) timeReasons.push('TIME_END:' + (item.endTime.reason ?? 'UNKNOWN'));
+
+    const remarksReasons: string[] = [];
+    if (item.remarks && item.remarksMatch.state !== 'auto_correct') {
+      remarksReasons.push('REMARKS:' + item.remarksMatch.state.toUpperCase());
+    }
+
+    for (const r of timeReasons) reasons.push(r);
+    for (const r of remarksReasons) reasons.push(r);
 
     const row: StandardizedStampTimeDesignationRow = {
       row_index: rowIndex,
@@ -215,28 +240,36 @@ export function joinTimeDesignationRows(
       end_time: item.endTime,
       remarks_raw: item.remarks,
       remarks_misread_match: item.remarksMatch,
-      assigned_room_number: confirmed && target ? target.room_number : null,
-      state: confirmed ? 'auto_confirmed' : 'needs_review',
+      assigned_room_number: linkable && target ? target.room_number : null,
+      // 行としての状態は、時刻・備考まで含めて全て確定できたときだけ auto_confirmed。
+      state: linkable && timeReasons.length === 0 && remarksReasons.length === 0 ? 'auto_confirmed' : 'needs_review',
       reasons,
     };
     rows.push(row);
 
-    if (confirmed && target) {
-      // 確定した行だけを本体エントリへ書き込む。
+    if (linkable && target) {
+      // 部屋へ結び付けられた行を本体エントリへ書き込む。確定できた項目はその値が、
+      // 確定できなかった項目は「確定できなかった」という解析結果(ok:false)がそのまま入る。
       target.time_start = item.startTime;
       target.time_end = item.endTime;
+      target.time_source_row_index = rowIndex;
+      // 備考は原文をそのまま渡す。辞書一致しなかった場合は match を needs_review のまま渡し、
+      // 後段(normalizeStandardizedStampScan)がその部屋を要確認にする。表示用のnoteとしては
+      // 確定させないため、読めていない備考が部屋カードに出ることはない。
       target.note_raw = item.remarks;
       target.note_misread_match = item.remarksMatch;
-      target.time_source_row_index = rowIndex;
       continue;
     }
 
-    // 未確定の行。結合先候補が分かっている場合は、その部屋にも「時間指定が要確認である」
-    // ことを伝える(時刻の値そのものは絶対に書き込まない)。
+    // どの部屋へ結び付けるか決められなかった行。結合先候補が分かっている場合は、その部屋にも
+    // 「時間指定が要確認である」ことを伝える(時刻の値そのものは絶対に書き込まない)。
     if (target) {
       target.needsReview = true;
       target.needsReviewReasons.push('TIME_DESIGNATION:' + reasons.join('|'));
     }
+    // unassigned は「部屋を特定できなかった行」だけを表す(利用者への警告文もその意味で出す)。
+    // 部屋が特定できている行は、確定できなかった項目をその部屋の要確認として伝えるため、
+    // ここには入れない。
     unassigned.push(row);
   }
 

@@ -318,7 +318,11 @@ const PROPERTY_ID = 'b6e18eed-f2f3-4674-812d-322732908616'; // コスモ六甲�
   function installRealtimeSync() {
     var channel = sb.channel('inspection-' + currentInspectionId);
 
-    ['room_results', 'equipment_state', 'extinguisher_state', 'stamp_data'].forEach(function (table) {
+    // [2026-08-15改訂 Phase 2] 'stamp_data' テーブルの購読をやめた。
+    // 予定情報(記号・時刻・備考)の保存先は kv_store の 'stamp:<物件>:<部屋>' に一本化されており、
+    // stamp_data テーブルへは誰も書き込んでいない。使われていない購読を残すと、予定情報の
+    // 出所が2つあるように見えてしまうため落とす(購読を外すだけで、書き込み経路の変更は無い)。
+    ['room_results', 'equipment_state', 'extinguisher_state'].forEach(function (table) {
       channel.on('postgres_changes',
         { event: '*', schema: 'public', table: table, filter: 'inspection_id=eq.' + currentInspectionId },
         function (payload) {

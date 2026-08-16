@@ -1,0 +1,292 @@
+#!/bin/bash
+# ==============================================================================
+# fireflow-ai-run — FireFlow 無人実行ランナー
+# [2026-08-15新設]
+#
+# 目的：ユーザーがPCの前にいない時間帯(仕事日 6:00〜18:00)でも、FireFlowの通常ローカル開発
+#       (調査→修正→テスト→typecheck→build→localhost確認→再テスト→報告)が
+#       承認待ちで止まらずに最後まで進むようにする。
+#
+# 重要操作(commit/push/deploy/npm install/.env/本番DB 等)は実行せず、
+# 「帰宅後PC作業」として最終レポートへ回す。承認ダイアログでは止まらない。
+#
+# 使い方:
+#   ./fireflow-ai-run                    docs/current_task.md をタスクとして実行
+#   ./fireflow-ai-run path/to/task.md    指定したファイルをタスクとして実行
+#   ./fireflow-ai-run "タスク内容"        文字列を直接タスクとして実行
+#
+# 終了ステータス:
+#   0  SUCCESS  安全な範囲でタスク完了
+#   10 PARTIAL  通常作業は進んだが、実LB確認等のユーザー操作が残る
+#   20 BLOCKED  重要操作が必要でこれ以上進められない
+#   1  ERROR    ランナー自体の失敗(claude起動不可・タスク未指定など)
+# ==============================================================================
+set -uo pipefail
+
+REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$REPO_DIR" || { echo "作業ディレクトリへ移動できません: $REPO_DIR" >&2; exit 1; }
+
+SETTINGS_FILE="$REPO_DIR/fireflow-runner.settings.json"
+DEFAULT_TASK_FILE="$REPO_DIR/docs/current_task.md"
+RUN_ID="$(date +%Y%m%d-%H%M%S)"
+LOG_DIR="$REPO_DIR/logs/claude-runs/$RUN_ID"
+
+# ---- 前提チェック --------------------------------------------------------
+command -v claude >/dev/null 2>&1 || { echo "claude コマンドが見つかりません。" >&2; exit 1; }
+[ -f "$SETTINGS_FILE" ] || { echo "権限設定が見つかりません: $SETTINGS_FILE" >&2; exit 1; }
+
+# ---- タスクの決定 --------------------------------------------------------
+# 引数なし → 既定のタスクファイル / 引数がファイル → その中身 / それ以外 → 文字列そのもの
+TASK_SOURCE=""
+TASK_TEXT=""
+if [ $# -eq 0 ]; then
+  if [ ! -f "$DEFAULT_TASK_FILE" ]; then
+    echo "タスクがありません。$DEFAULT_TASK_FILE に作業内容を書くか、引数で渡してください。" >&2
+    exit 1
+  fi
+  TASK_SOURCE="$DEFAULT_TASK_FILE"
+  TASK_TEXT="$(cat "$DEFAULT_TASK_FILE")"
+elif [ -f "$1" ]; then
+  TASK_SOURCE="$1"
+  TASK_TEXT="$(cat "$1")"
+else
+  TASK_SOURCE="(コマンドライン引数)"
+  TASK_TEXT="$*"
+fi
+
+if [ -z "$(printf '%s' "$TASK_TEXT" | tr -d '[:space:]')" ]; then
+  echo "タスクが空です: $TASK_SOURCE" >&2
+  exit 1
+fi
+
+# テンプレートのまま実行された場合も「タスク未指定」として止める。
+# (2026-08-15追加) 既定のタスクファイルは見出し・HTMLコメントの説明・プレースホルダーで
+# できているため、空白を除くだけの上の判定では中身が無くても通ってしまう。実際に
+# 2026-08-15の無人実行が、テンプレートのままのファイルで起動して1回分を空振りした。
+# 無人では誰も気付けないため、プレースホルダーが残っていることだけを根拠に確実に止める。
+# (テンプレートの指示は「置き換える」なので、残っている＝まだ書かれていない)
+TASK_PLACEHOLDER='（ここに作業内容を書く）'
+if printf '%s' "$TASK_TEXT" | grep -qF "$TASK_PLACEHOLDER"; then
+  echo "タスクが書かれていません(テンプレートのままです): $TASK_SOURCE" >&2
+  echo "「$TASK_PLACEHOLDER」の行を、実際にやってほしい作業内容へ置き換えてから実行してください。" >&2
+  exit 1
+fi
+
+mkdir -p "$LOG_DIR"
+
+# ---- 無人実行の前提をClaudeへ伝える前置き --------------------------------
+read -r -d '' PREAMBLE <<'PREAMBLE_EOF'
+あなたは FireFlow / Live Board の開発を、ユーザー不在の状態で自律的に進めています。
+
+## 最優先の前提
+作業開始前に必ず次を読み、全作業へ適用すること。
+- CLAUDE.md
+- docs/FireFlow_開発絶対ルール_2026-08-14.md
+
+## 無人実行モード（最重要）
+- 今この実行に人間はいません。質問しても誰も答えません。
+- 判断に迷っても人を待たないこと。前提を明記して進めること。
+- 許可されていない操作に当たったら、その操作だけ諦めて、他に安全に進められる作業を続けること。
+  同じコマンドを言い換えて再試行しないこと（拒否されるだけで時間を失います）。
+- 実行できない重要操作は「帰宅後PC作業」として最後にまとめること。
+
+## 自動で進めてよい範囲
+調査・コード検索・リポジトリ内のファイル編集と作成・npm run test:unit・npm run test:release・
+npm run typecheck・npm run build・npm run lint・npx tsx でのテスト実行・
+dev server 起動と localhost への curl 確認・ログ確認・修正・再テスト。
+
+dev server は必ずバックグラウンドで起動し、確認は `curl -s http://localhost:3000...` の形で行うこと
+（前面で起動すると実行が止まります）。
+
+コマンドの書き方（無駄な拒否を避けるため）:
+- テスト結果を絞りたいときは `npm run test:unit 2>&1 | tail -40` のようにパイプを使うこと。
+- リポジトリ外へのファイル出力（`> /tmp/...` など）や、`;` `&&` で複数コマンドを繋いだ長い一行は
+  拒否されやすい。コマンドは1つずつ、素直な形で実行すること。
+
+## 実行してはいけない操作（拒否されます。試さないこと）
+git add / commit / push / checkout / switch / merge / rebase / reset / stash、
+GitHub(gh)、Vercel・deploy、npm install / update / uninstall / publish、
+実API課金を伴う OCR（ocr:benchmark / ocr:compare）、Supabase・DBへの直接操作、
+.env や APIキーの閲覧・変更、rm -rf、sudo、その他の不可逆・破壊的操作。
+
+## 最終レポートの形式（必ずこの4見出しで、簡潔に）
+【自動完了】この実行で実際に終わったこと
+【テスト結果】test:unit / test:release / typecheck / build の結果（実行していないものは「未実行」と書く）
+【残課題】まだ終わっていない作業
+【帰宅後PC作業】ユーザーが今夜PCの前でやるべきことだけを、短い箇条書きで
+
+そして最終行に、次のいずれか1行だけを必ず出力すること。
+
+RUNNER_STATUS: SUCCESS
+RUNNER_STATUS: PARTIAL
+RUNNER_STATUS: BLOCKED
+
+- SUCCESS = 安全な範囲でタスクを完了した
+- PARTIAL = 通常作業は進んだが、実Live Board確認などユーザー操作が残っている
+- BLOCKED = 重要操作が必要で、これ以上は安全に進められない
+
+## 今回のタスク
+PREAMBLE_EOF
+
+PROMPT="$PREAMBLE
+
+$TASK_TEXT"
+
+# ---- 実行 ----------------------------------------------------------------
+{
+  echo "run_id:      $RUN_ID"
+  echo "started_at:  $(date '+%Y-%m-%d %H:%M:%S %z')"
+  echo "repo:        $REPO_DIR"
+  echo "task_source: $TASK_SOURCE"
+  echo "claude:      $(claude --version 2>&1 | head -1)"
+  echo "----- タスク内容 -----"
+  echo "$TASK_TEXT"
+} > "$LOG_DIR/task.txt"
+
+echo "FireFlow 無人実行ランナー"
+echo "  タスク : $TASK_SOURCE"
+echo "  ログ   : $LOG_DIR"
+echo "  開始   : $(date '+%H:%M:%S')"
+echo "実行中… （人間の承認待ちは発生しません）"
+echo
+
+# 権限は fireflow-runner.settings.json だけで決める。
+#   --setting-sources user,project … 対話用の .claude/settings.local.json(local)を読み込まない
+#   --settings                      … ランナー専用の allow / deny
+#   --disallowedTools               … 設定ファイルとは別に、CLI側でも最重要の破壊操作を塞ぐ二重の歯止め
+#   --permission-mode dontAsk       … 承認を求めない（許可されていない操作は拒否され、実行は続く）
+#   -p / --output-format stream-json … 非対話実行＋後から追える実行ログ
+CLAUDE_ARGS=(
+  -p
+  --output-format stream-json
+  --verbose
+  --settings "$SETTINGS_FILE"
+  --setting-sources "user,project"
+  --permission-mode dontAsk
+  --disallowedTools
+  "Bash(git commit*)" "Bash(git push*)" "Bash(git reset*)" "Bash(git clean*)"
+  "Bash(gh *)" "Bash(vercel*)" "Bash(npm install*)" "Bash(npm publish*)"
+  "Bash(rm -rf*)" "Bash(sudo*)" "AskUserQuestion" "ExitPlanMode"
+)
+
+# 予算上限は任意。FIREFLOW_RUN_BUDGET_USD=2 のように指定すると有効になる。
+if [ -n "${FIREFLOW_RUN_BUDGET_USD:-}" ]; then
+  CLAUDE_ARGS+=(--max-budget-usd "$FIREFLOW_RUN_BUDGET_USD")
+fi
+
+printf '%s' "$PROMPT" | claude "${CLAUDE_ARGS[@]}" > "$LOG_DIR/stream.jsonl" 2> "$LOG_DIR/stderr.log"
+CLAUDE_EXIT=$?
+
+# ---- ログから人が読める形を作る ------------------------------------------
+# 秘密情報がログへ残らないよう、既知の鍵の形をマスクする。
+redact() {
+  sed -E \
+    -e 's/sk-ant-[A-Za-z0-9_-]+/sk-ant-***REDACTED***/g' \
+    -e 's/sk-[A-Za-z0-9]{20,}/sk-***REDACTED***/g' \
+    -e 's/eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/***REDACTED_JWT***/g' \
+    -e 's/(SERVICE_ROLE_KEY|ANON_KEY|API_KEY|ACCESS_TOKEN|SECRET)([=":[:space:]]+)[A-Za-z0-9._-]{12,}/\1\2***REDACTED***/g'
+}
+
+if [ -s "$LOG_DIR/stream.jsonl" ]; then
+  redact < "$LOG_DIR/stream.jsonl" > "$LOG_DIR/stream.redacted.jsonl" && \
+    mv "$LOG_DIR/stream.redacted.jsonl" "$LOG_DIR/stream.jsonl"
+
+  # 実行した操作の一覧（何をしたかを後から追えるように）
+  jq -r 'select(.type=="assistant") | .message.content[]? | select(.type=="tool_use")
+         | "  - " + .name + ": "
+           + ((.input.command // .input.file_path // .input.pattern // .input.description // "")
+              | tostring | .[0:160])' \
+    "$LOG_DIR/stream.jsonl" 2>/dev/null > "$LOG_DIR/actions.log"
+
+  # 最終結果テキスト
+  jq -r 'select(.type=="result") | (.result // "")' "$LOG_DIR/stream.jsonl" 2>/dev/null > "$LOG_DIR/result.txt"
+
+  # 実行の統計（費用・所要時間・ターン数）
+  jq -r 'select(.type=="result")
+         | "duration_ms: \(.duration_ms // "-")\nnum_turns: \(.num_turns // "-")\ntotal_cost_usd: \(.total_cost_usd // "-")\nis_error: \(.is_error // false)"' \
+    "$LOG_DIR/stream.jsonl" 2>/dev/null > "$LOG_DIR/stats.txt"
+
+  # 権限で拒否された操作＝「無人では実行できなかった重要操作」。
+  # Claudeの報告漏れに関わらず、実際に何が止められたかをここで機械的に残す。
+  jq -r 'select(.type=="result") | .permission_denials[]?
+         | "  - " + .tool_name + ": "
+           + ((.tool_input.command // .tool_input.file_path // .tool_input.description // "")
+              | tostring | .[0:160])' \
+    "$LOG_DIR/stream.jsonl" 2>/dev/null > "$LOG_DIR/denied.log"
+fi
+
+[ -f "$LOG_DIR/result.txt" ] || : > "$LOG_DIR/result.txt"
+
+# ---- ステータス判定 ------------------------------------------------------
+STATUS="$(grep -oE 'RUNNER_STATUS:[[:space:]]*(SUCCESS|PARTIAL|BLOCKED)' "$LOG_DIR/result.txt" 2>/dev/null | tail -1 | grep -oE '(SUCCESS|PARTIAL|BLOCKED)')"
+
+if [ -z "$STATUS" ]; then
+  # Claudeが最終行を出さずに終わった場合。実行自体が失敗したのか、報告だけ欠けたのかを分ける。
+  if [ "$CLAUDE_EXIT" -ne 0 ] || [ ! -s "$LOG_DIR/result.txt" ]; then
+    STATUS="BLOCKED"
+  else
+    STATUS="PARTIAL"
+  fi
+fi
+
+{
+  echo "# FireFlow 無人実行レポート"
+  echo
+  echo "- run_id: $RUN_ID"
+  echo "- 開始: $(head -2 "$LOG_DIR/task.txt" | tail -1 | sed 's/started_at: *//')"
+  echo "- 終了: $(date '+%Y-%m-%d %H:%M:%S %z')"
+  echo "- タスク: $TASK_SOURCE"
+  echo "- ステータス: **$STATUS**"
+  echo "- claude 終了コード: $CLAUDE_EXIT"
+  echo
+  if [ -s "$LOG_DIR/stats.txt" ]; then
+    echo "## 実行統計"
+    echo '```'
+    cat "$LOG_DIR/stats.txt"
+    echo '```'
+    echo
+  fi
+  echo "## Claude 最終報告"
+  echo
+  cat "$LOG_DIR/result.txt"
+  echo
+  if [ -s "$LOG_DIR/denied.log" ]; then
+    echo
+    echo "## 無人実行では行えなかった操作（権限で拒否されたもの）"
+    echo "帰宅後、必要かどうかをユーザーが判断してください。"
+    echo
+    cat "$LOG_DIR/denied.log"
+    echo
+  fi
+  if [ -s "$LOG_DIR/stderr.log" ]; then
+    echo "## 実行中のエラー出力"
+    echo '```'
+    redact < "$LOG_DIR/stderr.log" | tail -50
+    echo '```'
+  fi
+} > "$LOG_DIR/report.md"
+
+ln -sfn "$LOG_DIR" "$REPO_DIR/logs/claude-runs/latest"
+
+# ---- 画面への要約 --------------------------------------------------------
+echo
+cat "$LOG_DIR/result.txt"
+echo
+if [ -s "$LOG_DIR/denied.log" ]; then
+  echo "--- 無人では実行できなかった操作（帰宅後に要判断） ---"
+  cat "$LOG_DIR/denied.log"
+  echo
+fi
+echo "=============================================="
+echo " ステータス : $STATUS"
+echo " レポート   : $LOG_DIR/report.md"
+echo " 実行ログ   : $LOG_DIR/actions.log"
+echo " 最新へのリンク: logs/claude-runs/latest"
+echo "=============================================="
+
+case "$STATUS" in
+  SUCCESS) exit 0 ;;
+  PARTIAL) exit 10 ;;
+  BLOCKED) exit 20 ;;
+  *)       exit 1 ;;
+esac
