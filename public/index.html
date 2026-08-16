@@ -6663,7 +6663,22 @@
       headers: await scanRequestHeaders(),
       body: JSON.stringify({ mode: mode, mediaType: mediaType, data: base64Data })
     });
-    var data = await response.json();
+    // [2026-08-16修正] サーバー側の日本語メッセージはJSONで返るが、実行時間切れ・ゲートウェイ
+    // エラー・本文サイズ超過のように、アプリまで届かずHTMLが返る失敗もある。従来はその場合に
+    // response.json()自体が例外になり、画面へJavaScriptの解析エラー(「Unexpected token '<'」等)が
+    // そのまま出て、利用者には何が起きたのか分からなかった。理由を日本語で伝える。
+    var data = null;
+    try {
+      data = await response.json();
+    } catch (parseErr) {
+      if (response.status === 504 || response.status === 408) {
+        throw new Error('読み取りに時間がかかりすぎたため中断されました（' + response.status + '）。写真の写りを確認して、もう一度お試しください。');
+      }
+      if (response.status === 413) {
+        throw new Error('画像の容量が大きすぎて送信できませんでした（413）。もう一度撮影するか、画質を下げてお試しください。');
+      }
+      throw new Error('サーバーから応答を受け取れませんでした（HTTP ' + response.status + '）。通信環境を確認して、もう一度お試しください。');
+    }
     if (!response.ok || data.error) {
       throw new Error(data.error || ('HTTPエラー ' + response.status));
     }
@@ -9366,26 +9381,27 @@
     // 内訳シートから検出できた実際の部屋番号一覧がFLOORSの構築に反映されるようになる。
     // 両方とも空の場合のみ、従来通り消火器設置場所テキストへフォールバックする(フォールバック
     // 発生条件自体は変更していない)。
+    // [2026-08-16修正、MASTER 94室問題] 従来ここには「部屋番号一覧が取れない場合は消火器の
+    // 設置場所テキスト(『◯◯号室前』等)から推定する」というフォールバックがあったが、これを
+    // 廃止する。消火器の設置場所は建物全体の消火器の置き場所であって「点検で立ち入る住戸の
+    // 一覧(MASTER)」ではないため、実物件(コスモザ・パークイースト1)では
+    //   ・立入対象39戸のうち24戸が入っていない(足りない)
+    //   ・立入対象ではない55室が入る(多すぎる)
+    // という「多いのに足りない」MASTERが黙って作られ、しかも完全成功として表示されていた。
+    // さらに、後から正しい住戸一覧(感知器数.xlsの39室)を取り込むと、追加のみでマージされるため
+    // 70 + 39 - 重複15 = 94室へ増殖していた(実LBで確認された症状そのもの)。
+    // MASTERはExcel由来の正しい住戸一覧を1つだけ持つ(恒久ルール)。代用品から作らない。
     var roomsFromSensorData = roomsFromSensorSheet.slice();
     roomsFromSensorBreakdown.forEach(function(room) {
       if (roomsFromSensorData.indexOf(room) === -1) roomsFromSensorData.push(room);
     });
     var floorMap = {};
-    if (roomsFromSensorData.length) {
-      roomsFromSensorData.forEach(function(room) {
-        var floorLabel = floorLabelOfRoomNumber(room);
-        if (!floorLabel) return;
-        if (!floorMap[floorLabel]) floorMap[floorLabel] = [];
-        if (floorMap[floorLabel].indexOf(room) === -1) floorMap[floorLabel].push(room);
-      });
-    } else {
-      newExtinguishers.forEach(function(item) {
-        if (!item._room) return;
-        var floorLabel = item.floor || '(階不明)';
-        if (!floorMap[floorLabel]) floorMap[floorLabel] = [];
-        if (floorMap[floorLabel].indexOf(item._room) === -1) floorMap[floorLabel].push(item._room);
-      });
-    }
+    roomsFromSensorData.forEach(function(room) {
+      var floorLabel = floorLabelOfRoomNumber(room);
+      if (!floorLabel) return;
+      if (!floorMap[floorLabel]) floorMap[floorLabel] = [];
+      if (floorMap[floorLabel].indexOf(room) === -1) floorMap[floorLabel].push(room);
+    });
 
     var floorKeys = Object.keys(floorMap).sort(function(a, b) {
       return parseInt(b) - parseInt(a); // 上階から下階の順（既存レイアウトに合わせる）
@@ -9398,10 +9414,22 @@
     // 内部フィールド(_room)は表示に使わないため、EXTINGUISHER_DATAとして確定させる前に取り除く。
     newExtinguishers.forEach(function(item) { delete item._room; });
 
-    if (!newFloors.length) {
-      showToast('部屋番号を読み取れませんでした。「一覧表」シートの設置場所欄に部屋番号の手がかりが' +
-        '無い物件の可能性があります（管理会社ごとの帳票差異の可能性があるため、要確認）。');
-      return;
+    // [2026-08-16追加、MASTER 94室問題] この点検報告書が「部屋一覧の正本」を自分で持っているか。
+    // 持っている場合(自火報（一覧）シート、または感知器の型式内訳シートに実際の部屋番号がある)は
+    // 従来どおり物件の読み込みとしてFLOORSを作り直す(他物件の正式MASTER経路は一切変更しない)。
+    // 持っていない場合は、MASTERを作らない・増やさない・削らない。点検報告書の役割は、既存の
+    // MASTERへ消火器・前回不良・設備一覧などの設備情報を付与することであり、部屋一覧の正本は
+    // Excel由来の住戸一覧(感知器数.xls等)が持つ。従来はここで return して読めた設備情報まで
+    // 丸ごと捨てていたが、読めた情報は捨てずに取り込む。
+    var reportHasRoomRoster = newFloors.length > 0;
+    var existingMasterRoomCount = 0;
+    FLOORS.forEach(function(f) { existingMasterRoomCount += f.rooms.length; });
+    if (!reportHasRoomRoster) {
+      showToast(existingMasterRoomCount
+        ? 'この点検報告書には部屋一覧（自火報の一覧）がありませんでした。部屋一覧は現在の' +
+          existingMasterRoomCount + '件のまま変更していません（消火器・前回不良・設備一覧のみ取り込みました）。'
+        : 'この点検報告書には部屋一覧（自火報の一覧）がありませんでした。部屋一覧は作成していません' +
+          '（消火器・前回不良・設備一覧は取り込みました）。感知器個数表または住戸一覧を取り込んでください。');
     }
 
     // ---- Data Bridge: 「避難器具」シートの「設置場所」欄から、はしご(避難はしご)設置部屋を
@@ -9445,7 +9473,10 @@
         if (ladderLocationText) break;
       }
       if (ladderLocationText) {
-        newLadderRooms = extractLadderRooms(ladderLocationText, newFloors);
+        // [2026-08-16修正] 突き合わせ先は「この後LBが持つ部屋一覧」。この報告書が部屋一覧の
+        // 正本を持たない場合は既存のMASTER(FLOORS)と突き合わせる(従来はnewFloorsが空になり、
+        // 読めていた設置場所テキストが必ず0件になっていた)。
+        newLadderRooms = extractLadderRooms(ladderLocationText, reportHasRoomRoster ? newFloors : FLOORS);
       }
     }
 
@@ -9464,11 +9495,24 @@
         }
       });
     }
-    PROPERTY = { name: buildingName, inspectionDate: inspectionDate, inspectionType: inspectionType, startTime: '09:00', endTime: '17:00', actualStartTime: '', actualEndTime: '', siteSupervisor: nextSiteSupervisor, scheduleDays: null };
-    seedScheduleDaysIfNeeded();
-    persistScheduleDays(); // 新しい物件のため、以前の物件の日程一覧の保存値を上書き(1件だけに戻す)
+    // [2026-08-16修正、MASTER 94室問題] 部屋一覧の正本を持つ報告書だけが「新しい物件の読込」
+    // として物件そのものを差し替える(従来の挙動、他物件の正式経路)。持たない報告書は、既存の
+    // 物件へ設備情報を付与するだけなので、物件の同一性(name)・日程・MASTERは差し替えない。
+    // nameを黙って書き換えると予定情報(StampStore)の物件スコープまで変わってしまうため、
+    // 既存の「未設定のときだけ補完する」既存パターン(applyPropertyMasterIntakeToLb)に揃える。
+    if (reportHasRoomRoster) {
+      PROPERTY = { name: buildingName, inspectionDate: inspectionDate, inspectionType: inspectionType, startTime: '09:00', endTime: '17:00', actualStartTime: '', actualEndTime: '', siteSupervisor: nextSiteSupervisor, scheduleDays: null };
+      seedScheduleDaysIfNeeded();
+      persistScheduleDays(); // 新しい物件のため、以前の物件の日程一覧の保存値を上書き(1件だけに戻す)
+    } else {
+      if (!PROPERTY.name) PROPERTY.name = buildingName;
+      PROPERTY.inspectionDate = inspectionDate;
+      PROPERTY.inspectionType = inspectionType;
+      PROPERTY.siteSupervisor = nextSiteSupervisor;
+      seedScheduleDaysIfNeeded();
+    }
     PREVIOUS_DEFECTS = newDefects;
-    FLOORS = newFloors;
+    if (reportHasRoomRoster) FLOORS = newFloors;
     LADDER_ROOMS = newLadderRooms;
     // 2026-07-21修正: EVACUATION_EQUIPMENT_ROOMS(「は」バッジ〈避難器具(降下障害)の記録〉の
     // 対象部屋)は、これまでコスモ六甲ガーデンフォート(組み込みデモ)固有の部屋番号一覧を
@@ -9494,7 +9538,10 @@
     // なお、②を読み込むたびにリセットするわけではない(②側のextendSensorMasterFromEntries()は
     // 引き続き追加・フィールド単位補完のみを行う)。あくまで「新しい物件の読込(=この関数の
     // 呼び出し)」のタイミングでのみリセットする。
-    SENSOR_MASTER = {};
+    // [2026-08-16修正、MASTER 94室問題] 「新しい物件の読込」に当たるのは、部屋一覧の正本を
+    // 自分で持つ報告書だけ。持たない報告書は既存物件への設備情報の付与であり、先に取り込んだ
+    // 感知器個数表の値(読めた情報)をここで消してはいけない。
+    if (reportHasRoomRoster) SENSOR_MASTER = {};
     // [2026-08-09追加、SENSOR MASTER P1修正] シート名の固定文字列一致(「自火報（一覧）」等)
     // ではなく、列見出し(「差動式スポット型」「定温式スポット型」)を手がかりに感知器内訳
     // シートを動的に検出し、該当する全シート(本物件では№1〜№4の4枚)を横断して部屋ごとの
@@ -9520,15 +9567,20 @@
     // デモ用STAMP_DATA(コスモ六甲ガーデンフォート、102〜817)がメモリ上に残っていた。その結果、
     // 実物件に偶然同じ部屋番号があるだけで、無関係なデモの時刻(705=10:30、603=16:00等)が
     // 部屋カードに表示されていた。他のデータと同じタイミングでクリアする。
-    clearDemoStampDataForPropertyChange();
-    state = {};
-    scheduleLabels = {};
-    haBadges = {};
-    sensorCounts = {};
-    extinguisherState = {};
-    equipmentState = {};
-    currentHomeMode = 'normal';
-    activeFilter = null;
+    // [2026-08-16修正、MASTER 94室問題] リセットするのは「新しい物件の読込」のときだけ。
+    // 部屋一覧の正本を持たない報告書は既存物件への設備情報の付与であり、点検中データ・
+    // 予定情報(StampStore)を消さない(消すと、先に読み取った捺印表の予定が消える)。
+    if (reportHasRoomRoster) {
+      clearDemoStampDataForPropertyChange();
+      state = {};
+      scheduleLabels = {};
+      haBadges = {};
+      sensorCounts = {};
+      extinguisherState = {};
+      equipmentState = {};
+      currentHomeMode = 'normal';
+      activeFilter = null;
+    }
 
     // [2026-08-15追加 Phase 1] 物件(MASTER)が入れ替わったので、その物件スコープの予定情報を
     // 保存先から復元する。従来はここで消去するだけで復元しなかったため、捺印表を読み取って
@@ -9537,7 +9589,9 @@
 
     initScheduleLabels();
     renderFilterChips();
-    document.querySelector('.building').textContent = buildingName;
+    // [2026-08-16修正] 部屋一覧の正本を持たない報告書ではPROPERTY.nameを差し替えないため、
+    // ヘッダー表示も実際のPROPERTY.nameに合わせる(表示と内部状態を食い違わせない)。
+    document.querySelector('.building').textContent = PROPERTY.name || buildingName;
     syncDateDisplays();
     document.getElementById('progressTotalLabel').textContent = ' / ' + TOTAL_ROOMS + '件';
     document.getElementById('roomListTitle').textContent = '部屋一覧（全' + TOTAL_ROOMS + '件）';
@@ -9550,7 +9604,13 @@
     // 更新しておく。これを怠ると、Excel取込直後にリロードした場合に取り込んだはずの物件が
     // 消え、意図せず起動ゲートで「新規/デモ」を選び直す羽目になる。
     persistCurrentProperty();
-    showToast('「' + buildingName + '」のデータを読み込みました（全' + TOTAL_ROOMS + '部屋、消火器' + newExtinguishers.length + '本、前回不良' + newDefects.length + '件）');
+    // [2026-08-16修正] 部屋一覧をこの資料から作っていない場合に「全N部屋」と言うと、あたかも
+    // この報告書がN部屋を読み取ったかのように誤解させる(降格・未取得を成功として表示しない)。
+    if (reportHasRoomRoster) {
+      showToast('「' + (PROPERTY.name || buildingName) + '」のデータを読み込みました（全' + TOTAL_ROOMS + '部屋、消火器' + newExtinguishers.length + '本、前回不良' + newDefects.length + '件）');
+    } else {
+      showToast('「' + (PROPERTY.name || buildingName) + '」の消火器' + newExtinguishers.length + '本、前回不良' + newDefects.length + '件を取り込みました（部屋一覧はこの資料からは作成していません）。');
+    }
   }
 
   /* ---- 画面ロック（手動ロックボタン／ロック画面をタップで解除） ---- */
@@ -10272,6 +10332,16 @@
     return '判別不能';
   }
 
+  // [2026-08-16追加 新捺印表が読み込めない] 「資料をまとめて追加」の解析順を決める優先度。
+  // 小さいほど先に処理する。部屋一覧(MASTER)を作りうる資料を先に、MASTERへ後から情報を
+  // 付ける資料(捺印表・希望時間表)を後に回すためだけの一般ルールで、資料ごとの処理内容には
+  // 一切関与しない。分類名はDOCUMENT_CLASSIFICATIONSのものをそのまま使う。
+  function docBatchProcessingPriority(classification) {
+    if (classification === '点検報告書' || classification === '点検結果報告書(総括表)'
+      || classification === '住戸一覧' || classification === '感知器個数表') return 0;
+    return 1;
+  }
+
   function docBatchStatusLabel(status) {
     switch (status) {
       case 'pending': return '未解析';
@@ -10398,6 +10468,43 @@
     }
 
     if (classification === '捺印表' || classification === '希望時間表') {
+      // [2026-08-16修正 新捺印表が読み込めない] 同じJPGでも、入口によって流れ先が違っていた。
+      //   ・画像1枚を直接選ぶ(routeUnifiedUpload)  → 新OCR経路(/api/v1/standardized-stamp-sheet/scan)
+      //   ・他の資料と一緒に選ぶ／資料をまとめて追加  → ここでLegacy(/api/scan-time-request)
+      // Legacyは「1部屋につき1枚の点検希望時間連絡票」を読む別様式のOCRであり、A4 1枚に全戸が
+      // 並ぶ新捺印表を渡すと部屋番号を1つも確定できず「部屋番号を読み取れませんでした。」で
+      // 失敗する(=実LBで報告された「新捺印表が読み込めない」)。しかも同経路は送信前に
+      // compressImage()で画像を縮小するため、全戸ぶんの細かいマスはさらに読めなくなる。
+      // 振り分けの基準を入口間で一致させる(Legacy/新OCRの違いを利用者へ見せない、
+      // 資料読み込み入口は1つ、という恒久ルール)。判定は既存の入口と同じ関数を使う。
+      if (isStandardizedStampImageFile(draft.file) || STANDARDIZED_STAMP_IMAGE_EXTS[ext]) {
+        try {
+          // 新OCR経路は原寸のまま送る(routeUnifiedUploadと同じ。縮小しない)。
+          var stampSheetDataUrl = await readFileAsDataURL(draft.file);
+          var stampSheetResult = await fetchStandardizedStampScanResult(stampSheetDataUrl);
+          // 新捺印表はこの物件の希望時間の一次情報のため、既存の読み取り結果を一度空にしてから
+          // 入れ直す(runStandardizedStampScan()と同じ扱い。部屋一覧(FLOORS)には触れない)。
+          clearDemoStampDataForPropertyChange();
+          var stampSheetApplied = applyStandardizedStampDataToLb(stampSheetResult.stampData);
+          draft.status = 'done';
+          var stampSheetNotes = [stampSheetApplied.appliedRooms.length + '部屋分の予定を反映しました。'];
+          if (stampSheetApplied.needsReviewRooms.length) {
+            stampSheetNotes.push('うち' + stampSheetApplied.needsReviewRooms.length + '部屋は要確認です。');
+          }
+          if (stampSheetApplied.unmatchedRooms.length) {
+            stampSheetNotes.push('部屋一覧に無い番号' + stampSheetApplied.unmatchedRooms.length + '件は未反映です(先に住戸一覧を取り込んでください)。');
+          }
+          if (stampSheetResult.unassignedTimeDesignationRowCount) {
+            stampSheetNotes.push('部屋を特定できない時間指定' + stampSheetResult.unassignedTimeDesignationRowCount + '件は未反映のため原本の確認が必要です。');
+          }
+          draft.statusNote = stampSheetNotes.join('');
+        } catch (err) {
+          // 失敗した理由(未ログイン・通信・AI応答等)をそのまま見せる。黙って「未対応」にしない。
+          draft.status = 'failed';
+          draft.statusNote = '自動読み取りに失敗しました：' + ((err && err.message) ? err.message : String(err));
+        }
+        return;
+      }
       if (isImage) {
         try {
           var dataUrl = await readFileAsDataURL(draft.file);
@@ -10743,8 +10850,18 @@
     docBatchProcessing = true;
     renderDocBatchFileList();
     (async function() {
-      for (var i = 0; i < DOC_BATCH_DRAFTS.length; i++) {
-        var draft = DOC_BATCH_DRAFTS[i];
+      // [2026-08-16追加 新捺印表が読み込めない] 資料には依存関係がある。捺印表・希望時間表は
+      // MASTER(部屋一覧)に在る部屋にしか反映できないため、部屋一覧を作りうる資料より先に
+      // 処理されると、正しく読み取れていても全件が「部屋一覧に無い番号」で未反映になる。
+      // 逆に、部屋一覧を持つ点検報告書が後から処理されると「新しい物件の読込」として
+      // 予定情報がリセットされ、直前に読み取った捺印表の結果が消える。
+      // 利用者にファイルを選ぶ順番を意識させないため、解析の順序だけをここで整える
+      // (表示順・保存順・各資料の処理内容は一切変えない)。
+      var processingOrder = DOC_BATCH_DRAFTS.slice().sort(function(a, b) {
+        return docBatchProcessingPriority(a.classification) - docBatchProcessingPriority(b.classification);
+      });
+      for (var i = 0; i < processingOrder.length; i++) {
+        var draft = processingOrder[i];
         draft.status = 'processing';
         renderDocBatchFileList();
         try {
