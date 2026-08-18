@@ -47,6 +47,16 @@ function extractFunctionSource(functionName: string): string {
   throw new Error('unbalanced braces: ' + functionName);
 }
 
+/* 単一行の `var NAME = ...;` も同じくindex.htmlの実ソースから取り出す
+   ([2026-08-18 Phase 1C] storageSet/storageGet が参照する property scope の設定値のため。
+   写経した別定義を置くと、実LBと違う設定でテストが通ってしまう)。 */
+function extractVarDeclSource(name: string): string {
+  const marker = 'var ' + name + ' = ';
+  const startIdx = html.indexOf(marker);
+  if (startIdx === -1) throw new Error('var not found: ' + name);
+  return html.slice(startIdx, html.indexOf(';', startIdx) + 1);
+}
+
 /* StampStoreへのアダプタ結線(createStampStore({ adapters: {...} }))も、index.htmlの実ソースを使う。
    ここを写経するとテストだけ通って実LBが壊れる、という状態を作れてしまうため。 */
 function extractStampStoreWiring(): string {
@@ -133,7 +143,15 @@ function makeBrowser(idb: FakeIdb, remoteMode: RemoteMode): Sandbox {
 
   vm.createContext(sandbox);
   vm.runInContext(STORE_SOURCE, sandbox);
+  // [2026-08-18 Phase 1C] storageSet/storageGet/storageDelete/storageList は property scope 層を
+  // 通るようになったため、その実ソースも一緒に読み込む(この環境では
+  // window.FIREFLOW_PROPERTY_SCOPE_ENABLED が未設定＝flag OFF なので、保存キーは従来のまま)。
   vm.runInContext([
+    'PROPERTY_SCOPE_ENABLED', 'PROPERTY_SCOPED_KEY_PREFIXES', 'PROPERTY_SCOPED_EXACT_KEYS',
+  ].map(extractVarDeclSource).join('\n'), sandbox);
+  vm.runInContext([
+    'isPropertyScopedKey', 'propertyScopedKey', 'propertyUnscopedKey',
+    'isValidScopePropertyId', 'currentScopePropertyId', 'applyPropertyScope',
     'lcCacheKey', 'storageSet', 'storageGet', 'storageDelete', 'storageList', 'listKeysLocalFirst',
   ].map(extractFunctionSource).join('\n\n'), sandbox);
   vm.runInContext(extractStampStoreWiring(), sandbox);

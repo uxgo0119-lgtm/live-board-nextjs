@@ -4201,6 +4201,110 @@
   }
   function lcCacheKey(key, shared) { return (shared ? 'shared:' : 'own:') + key; }
 
+  /* ============================================================================
+     [2026-08-18新設 Phase 1C] 業務保存データの物件スコープ（property scope）
+     ----------------------------------------------------------------------------
+     【目的】「物件Aの101号室」と「物件Bの101号室」を、保存層で絶対に別物として扱う。
+     従来の保存キーは 'fireflow-binder:101' のように部屋番号だけで、どの物件のデータかを
+     構造として持っていなかった。部屋番号が偶然一致する別物件を読み込むと、ローカル
+     キャッシュ(IndexedDB)側で同じキーへ衝突する。
+
+     【方式】保存キーの rawKey 側に propertyId を差し込む（lcCacheKey() の形式は変更しない。
+     既存のIndexedDB構造・既存テストとの互換性を壊さないため）。
+       旧: fireflow-binder:101              → 新: fireflow-binder:<propertyId>:101
+       旧: fireflow-schedule-override:101   → 新: fireflow-schedule-override:<propertyId>:101
+       旧: fireflow-equip:自火報            → 新: fireflow-equip:<propertyId>:自火報
+       旧: fireflow-property:current        → 新: fireflow-property:<propertyId>:current
+     rawKey → 既存 lcCacheKey() → IndexedDB という流れは変えないので、キャッシュの物件分離は
+     自動的に成立する。
+
+     【段階導入】PROPERTY_SCOPE_ENABLED が false（既定）の間は、キーも保存先も復元も
+     Phase 1B時点と完全に同一で、Phase 1C単独でrollbackできる。旧保存データの移行
+     (migration)はPhase 1Dの担当で、ここでは旧キーを削除・コピー・読み替えしない。
+     ============================================================================ */
+  // 既定はOFF（＝Phase 1B以前と完全同一挙動）。Phase 1Dのmigration完了後にONへ切り替える。
+  // 動作確認・テストからは window.FIREFLOW_PROPERTY_SCOPE_ENABLED = true で有効化できる。
+  var PROPERTY_SCOPE_ENABLED = (typeof window !== 'undefined' && window.FIREFLOW_PROPERTY_SCOPE_ENABLED === true);
+
+  /* スコープ対象は「業務データ」だけ。端末側の設定(lb_* / fireflow-current-property-id 等)は
+     物件が変わっても引き継ぐべき値なので対象外にする（業務データと端末設定を混ぜない）。
+     StampStore('stamp:<物件>:<部屋>' / 'fireflow-stamp:<部屋>')は既に自前の物件スコープを
+     持つため、Phase 1Cでは触らない（propertyIdへの正式接続はPhase 1E）。
+     ここは許可リスト方式にしてある。未知のキーは従来どおりスコープ無しで扱われるため、
+     取りこぼしがあっても「別物件へ混入する」側ではなく「Phase 1B相当のまま」側へ倒れる。 */
+  var PROPERTY_SCOPED_KEY_PREFIXES = [
+    'fireflow-property:',          // current / buildingNotes / boTable: / progressLog / siteSupervisor / scheduleDays / equipmentList
+    'fireflow-binder:',            // 部屋ごとの点検状態
+    'fireflow-schedule-override:', // 部屋ごとの点検希望時刻の当日変更
+    'fireflow-equip:',             // 設備ごとの点検結果
+    'fireflow-ext:',               // 消火器ごとの点検結果
+    'fireflow-presence:',          // 在席プレゼンス
+  ];
+  var PROPERTY_SCOPED_EXACT_KEYS = [
+    'fireflow-documents',          // アップロード資料の一覧
+  ];
+
+  function isPropertyScopedKey(key) {
+    var k = String(key == null ? '' : key);
+    if (PROPERTY_SCOPED_EXACT_KEYS.indexOf(k) !== -1) return true;
+    for (var i = 0; i < PROPERTY_SCOPED_KEY_PREFIXES.length; i++) {
+      if (k.indexOf(PROPERTY_SCOPED_KEY_PREFIXES[i]) === 0) return true;
+    }
+    return false;
+  }
+
+  // 先頭の領域名(最初の':'まで)の直後へpropertyIdを差し込む。':'を含まないキー
+  // ('fireflow-documents')は末尾へ付ける。領域名は変えないので、キー体系の全面刷新にならない。
+  function propertyScopedKey(rawKey, propertyId) {
+    var k = String(rawKey);
+    var idx = k.indexOf(':');
+    if (idx === -1) return k + ':' + propertyId;
+    return k.slice(0, idx + 1) + propertyId + k.slice(idx);
+  }
+  // propertyScopedKey() の逆変換。storageList()が返すキーを呼び出し側へ渡す前に元へ戻し、
+  // 「listで得たキーをそのままstorageGet()へ渡す」既存経路が二重スコープにならないようにする。
+  function propertyUnscopedKey(scopedKey, propertyId) {
+    var k = String(scopedKey);
+    var idx = k.indexOf(':');
+    if (idx === -1) return k;
+    var rest = k.slice(idx + 1);
+    if (rest === propertyId) return k.slice(0, idx);
+    if (rest.indexOf(propertyId + ':') === 0) return k.slice(0, idx + 1) + rest.slice(propertyId.length + 1);
+    return k; // スコープが付いていないキーはそのまま返す
+  }
+
+  // propertyIdの正本判定は supabase-integration.js 側に1つだけ置く。CDNブロック等で
+  // 未定義のときのために同じ条件(UUID v4・小文字・36文字)をここでも持つ。
+  function isValidScopePropertyId(value) {
+    if (typeof window !== 'undefined' && typeof window.isValidPropertyId === 'function') {
+      return window.isValidPropertyId(value);
+    }
+    return typeof value === 'string' && value.length === 36 &&
+      /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(value);
+  }
+  // スコープに使うpropertyIdは、必ずこの正式な単一取得経路から取る。
+  // PROPERTY.name（表示名）をスコープに使わない。
+  function currentScopePropertyId() {
+    return (typeof window !== 'undefined' && typeof window.getCurrentPropertyId === 'function')
+      ? window.getCurrentPropertyId() : null;
+  }
+
+  /* 保存・読込の直前に1回だけ通す、rawKeyへpropertyIdを付ける唯一の場所。
+     opts.alreadyScoped は送信キュー(outbox)の再送専用で、「積んだ時点のpropertyIdで
+     既にスコープ済み」という意味。現在のcurrentPropertyIdで付け直さない。
+     propertyIdが null・空・不正UUIDのときは保存も読込も拒否する（例外を投げる）。
+     旧物件へ書くフォールバックも、INITIAL_PROPERTY_ID等への推測フォールバックもしない。 */
+  function applyPropertyScope(key, opts) {
+    if (opts && opts.alreadyScoped) return { key: key, propertyId: opts.propertyId || null };
+    if (!PROPERTY_SCOPE_ENABLED) return { key: key, propertyId: null };
+    if (!isPropertyScopedKey(key)) return { key: key, propertyId: null };
+    var propertyId = currentScopePropertyId();
+    if (!isValidScopePropertyId(propertyId)) {
+      throw new Error('PROPERTY_SCOPE_REQUIRED: propertyIdが無い/不正なため業務データを保存・読込できません (key=' + key + ')');
+    }
+    return { key: propertyScopedKey(key, propertyId), propertyId: propertyId };
+  }
+
   // 2026-07-20改善: 「完全オフラインでも主要機能を使えるようにする」対応の一環。従来の
   // syncStatusBadge(未送信件数バッジ)は「送信キューに何件残っているか」だけを表示しており、
   // 「今そもそも通信できているか」「今まさに再送を試みているか」は分からなかった。
@@ -4248,6 +4352,9 @@
   }
 
   var outboxRetryTimer = null;
+  // [2026-08-18追加 Phase 1C] propertyId不明の旧outboxについての警告は1回だけ出す
+  // (5秒ごとの再送でコンソールを埋めないため)。
+  var warnedUnknownPropertyOutbox = false;
   function scheduleOutboxRetry() {
     if (outboxRetryTimer) return;
     outboxRetryTimer = setInterval(flushOutbox, 5000);
@@ -4267,19 +4374,38 @@
     isSyncingNow = true;
     updateSyncBadge();
     var sentCount = 0;
+    var unknownPropertyCount = 0;
     for (var i = 0; i < items.length; i++) {
       var item = items[i];
+      /* [2026-08-18追加 Phase 1C] 送信先の物件は「積んだ時点のpropertyId」で決める。
+         再送時のcurrentPropertyIdで決めると、A物件でオフライン保存した内容が、
+         その後Bへ切り替わっていた場合にB物件へ入ってしまう。
+         propertyIdを持たないPhase 1C以前の旧itemは、どの物件のものか推測できない。
+         推測で割り当てず、UNKNOWNとしてキューに残す(削除もしない)。取り扱いは
+         Phase 1Dのmigrationへ回す。 */
+      if (PROPERTY_SCOPE_ENABLED && !item.alreadyScoped && isPropertyScopedKey(item.rawKey)) {
+        unknownPropertyCount++;
+        continue;
+      }
+      var outboxOpts = { alreadyScoped: true, propertyId: item.propertyId || null };
       try {
         if (item.deleted) {
-          await storageDelete(item.rawKey, item.shared);
+          await storageDelete(item.rawKey, item.shared, outboxOpts);
         } else {
-          await storageSet(item.rawKey, item.value, item.shared);
+          await storageSet(item.rawKey, item.value, item.shared, outboxOpts);
         }
         await lcDelete('outbox', item.key);
         sentCount++;
       } catch (err) {
         // このアイテムはまだ送れない。次回のリトライへ持ち越す(他のアイテムの送信は継続する)。
       }
+    }
+    if (unknownPropertyCount > 0 && !warnedUnknownPropertyOutbox) {
+      warnedUnknownPropertyOutbox = true;
+      try {
+        console.warn('[Phase 1C] propertyIdを持たない送信待ちデータが ' + unknownPropertyCount
+          + ' 件あります。どの物件のものか推測できないため送信せずに保持します(削除もしません)。');
+      } catch (err) {}
     }
     isSyncingNow = false;
     if (sentCount > 0) {
@@ -4291,52 +4417,70 @@
 
   // window.storage(set/get/delete/list)の直接呼び出しの代わりに、必ずこちらを使う。
   // 通信の成否に関わらずローカルへ即時保存し、失敗した書き込みだけを自動的に再送する。
-  async function storageSet(key, value, shared) {
-    var cacheKey = lcCacheKey(key, shared);
+  // [2026-08-18追加 Phase 1C] 第4引数optsは送信キュー(outbox)の再送専用の内部引数。
+  // 通常の呼び出し(3引数まで)ではPhase 1B以前と同じシグネチャのまま使える。
+  async function storageSet(key, value, shared, opts) {
+    var scope = applyPropertyScope(key, opts);
+    var cacheKey = lcCacheKey(scope.key, shared);
     await lcPut('cache', { key: cacheKey, value: value, updatedAt: Date.now() });
     try {
       if (!window.storage) throw new Error('window.storage is not ready yet');
-      await window.storage.set(key, value, shared);
+      await window.storage.set(scope.key, value, shared, scope.propertyId);
       await lcDelete('outbox', cacheKey);
     } catch (err) {
-      await lcPut('outbox', { key: cacheKey, rawKey: key, value: value, shared: !!shared, deleted: false, updatedAt: Date.now() });
+      // 送信先の物件は「積んだ時点のpropertyId」で確定させる(再送時のcurrentPropertyIdでは決めない)。
+      await lcPut('outbox', { key: cacheKey, rawKey: scope.key, value: value, shared: !!shared, deleted: false,
+        propertyId: scope.propertyId, alreadyScoped: true, updatedAt: Date.now() });
       scheduleOutboxRetry();
     }
     updateSyncBadge();
   }
-  async function storageGet(key, shared) {
-    var cacheKey = lcCacheKey(key, shared);
+  async function storageGet(key, shared, opts) {
+    var scope = applyPropertyScope(key, opts);
+    var cacheKey = lcCacheKey(scope.key, shared);
     try {
       if (!window.storage) throw new Error('window.storage is not ready yet');
-      var result = await window.storage.get(key, shared);
+      var result = await window.storage.get(scope.key, shared, scope.propertyId);
       lcPut('cache', { key: cacheKey, value: result.value, updatedAt: Date.now() }).catch(function () {});
-      return result;
+      // 呼び出し側へは、渡されたキー(スコープ前)をそのまま返す。値・shared・形は従来と同じ。
+      return { key: key, value: result.value, shared: !!shared };
     } catch (err) {
       var cached = await lcGet('cache', cacheKey);
       if (cached) return { key: key, value: cached.value, shared: !!shared };
       throw err;
     }
   }
-  async function storageDelete(key, shared) {
-    var cacheKey = lcCacheKey(key, shared);
+  async function storageDelete(key, shared, opts) {
+    var scope = applyPropertyScope(key, opts);
+    var cacheKey = lcCacheKey(scope.key, shared);
     await lcDelete('cache', cacheKey);
     try {
       if (!window.storage) throw new Error('window.storage is not ready yet');
-      await window.storage.delete(key, shared);
+      await window.storage.delete(scope.key, shared, scope.propertyId);
       await lcDelete('outbox', cacheKey);
     } catch (err) {
-      await lcPut('outbox', { key: cacheKey, rawKey: key, value: null, shared: !!shared, deleted: true, updatedAt: Date.now() });
+      await lcPut('outbox', { key: cacheKey, rawKey: scope.key, value: null, shared: !!shared, deleted: true,
+        propertyId: scope.propertyId, alreadyScoped: true, updatedAt: Date.now() });
       scheduleOutboxRetry();
     }
     updateSyncBadge();
   }
-  async function storageList(prefix, shared) {
+  async function storageList(prefix, shared, opts) {
     // list()はプレゼンス表示やスキャン結果の一覧取得など補助的な用途のみで使われており、
     // 部屋の点検結果そのものではないため、今回はローカルフォールバックの対象外としている
     // (取れなければ空扱いにするだけで、アプリを止めない)。
+    var scope = applyPropertyScope(prefix, opts);
     if (!window.storage) return { keys: [], prefix: prefix, shared: !!shared };
     try {
-      return await window.storage.list(prefix, shared);
+      var result = await window.storage.list(scope.key, shared, scope.propertyId);
+      if (!scope.propertyId) return result;
+      // 返すキーからはpropertyIdを取り除く。呼び出し側は従来どおりのキーを受け取り、
+      // それをそのままstorageGet()へ渡しても二重スコープにならない。
+      return {
+        keys: (result && result.keys ? result.keys : []).map(function (k) { return propertyUnscopedKey(k, scope.propertyId); }),
+        prefix: prefix,
+        shared: !!shared,
+      };
     } catch (err) {
       return { keys: [], prefix: prefix, shared: !!shared };
     }

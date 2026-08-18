@@ -294,9 +294,63 @@ const INITIAL_PROPERTY_ID = 'b6e18eed-f2f3-4674-812d-322732908616'; // コスモ
   /* ---------------------------------------------------------------------
      2. window.storage 互換シム（kv_store テーブルを裏で使う）
      --------------------------------------------------------------------- */
+  /* [2026-08-18追加 Phase 1C] 「保存要求が作られた時点の物件」へ確実に書き戻すための経路。
+     通常の保存・読込（＝現在の物件。propertyId未指定 or currentPropertyIdと同じ）は、
+     下の window.storage の従来コードをそのまま通る。Phase 1B以前と1文字も挙動を変えない
+     ことがPhase 1Cのrollback条件なので、既存経路には手を入れず、別物件を指定されたときだけ
+     こちらへ分岐させている（現状この分岐に入るのは、送信キュー(outbox)の再送で
+     「積んだ時点のpropertyId ≠ 現在のcurrentPropertyId」になった場合だけ）。
+     推測でcurrentPropertyIdへ書き戻すことは絶対にしない。 */
+  function kvScopeQuery(q, propertyId, shared) {
+    q = q.eq('property_id', propertyId);
+    return shared ? q.is('owner_id', null) : q.eq('owner_id', currentUser.id);
+  }
+  async function kvGetForProperty(propertyId, key, shared) {
+    var q = kvScopeQuery(sb.from('kv_store').select('value').eq('key', key).eq('shared', !!shared), propertyId, shared);
+    var { data, error } = await q.maybeSingle();
+    if (error) throw error;
+    if (!data) throw new Error('key not found: ' + key);
+    return { key: key, value: data.value, shared: !!shared };
+  }
+  async function kvSetForProperty(propertyId, key, value, shared) {
+    // shared=trueの行はowner_idがNULLでON CONFLICTが発火しないため、window.storage.set と
+    // 同じく「先にselect、あれば更新・なければ新規作成」の手動upsertにしている。
+    var q = kvScopeQuery(sb.from('kv_store').select('id').eq('key', key).eq('shared', !!shared), propertyId, shared);
+    var { data: existing, error: selError } = await q.maybeSingle();
+    if (selError) return null;
+    if (existing) {
+      var { error: updError } = await sb.from('kv_store')
+        .update({ value: String(value), updated_at: new Date().toISOString() })
+        .eq('id', existing.id);
+      if (updError) return null;
+    } else {
+      var { error: insError } = await sb.from('kv_store').insert({
+        property_id: propertyId, key: key, value: String(value), shared: !!shared,
+        owner_id: shared ? null : currentUser.id, updated_at: new Date().toISOString(),
+      });
+      if (insError) return null;
+    }
+    return { key: key, value: value, shared: !!shared };
+  }
+  async function kvDeleteForProperty(propertyId, key, shared) {
+    var q = kvScopeQuery(sb.from('kv_store').delete().eq('key', key).eq('shared', !!shared), propertyId, shared);
+    var { error } = await q;
+    if (error) return null;
+    return { key: key, deleted: true, shared: !!shared };
+  }
+  async function kvListForProperty(propertyId, prefix, shared) {
+    var q = sb.from('kv_store').select('key').eq('shared', !!shared);
+    if (prefix) q = q.like('key', prefix + '%');
+    q = kvScopeQuery(q, propertyId, shared);
+    var { data, error } = await q;
+    if (error) return null;
+    return { keys: (data || []).map(function (r) { return r.key; }), prefix: prefix, shared: !!shared };
+  }
+
   function installStorageShim() {
     window.storage = {
-      async get(key, shared) {
+      async get(key, shared, propertyId) {
+        if (propertyId && propertyId !== currentPropertyId) return kvGetForProperty(propertyId, key, shared);
         var q = sb.from('kv_store').select('value').eq('property_id', currentPropertyId).eq('key', key).eq('shared', !!shared);
         q = shared ? q.is('owner_id', null) : q.eq('owner_id', currentUser.id);
         var { data, error } = await q.maybeSingle();
@@ -304,7 +358,8 @@ const INITIAL_PROPERTY_ID = 'b6e18eed-f2f3-4674-812d-322732908616'; // コスモ
         if (!data) throw new Error('key not found: ' + key);
         return { key: key, value: data.value, shared: !!shared };
       },
-      async set(key, value, shared) {
+      async set(key, value, shared, propertyId) {
+        if (propertyId && propertyId !== currentPropertyId) return kvSetForProperty(propertyId, key, value, shared);
         // 【修正】以前はupsert({onConflict:'...,owner_id'})を使っていましたが、
         // shared=trueの行はowner_idが常にNULLで、PostgreSQLはNULL同士を「一致」と
         // みなさないため、ON CONFLICTが一度も発火せず、保存するたびに行が増え続ける
@@ -331,14 +386,16 @@ const INITIAL_PROPERTY_ID = 'b6e18eed-f2f3-4674-812d-322732908616'; // コスモ
         }
         return { key: key, value: value, shared: !!shared };
       },
-      async delete(key, shared) {
+      async delete(key, shared, propertyId) {
+        if (propertyId && propertyId !== currentPropertyId) return kvDeleteForProperty(propertyId, key, shared);
         var q = sb.from('kv_store').delete().eq('property_id', currentPropertyId).eq('key', key).eq('shared', !!shared);
         q = shared ? q.is('owner_id', null) : q.eq('owner_id', currentUser.id);
         var { error } = await q;
         if (error) return null;
         return { key: key, deleted: true, shared: !!shared };
       },
-      async list(prefix, shared) {
+      async list(prefix, shared, propertyId) {
+        if (propertyId && propertyId !== currentPropertyId) return kvListForProperty(propertyId, prefix, shared);
         var q = sb.from('kv_store').select('key').eq('property_id', currentPropertyId).eq('shared', !!shared);
         if (prefix) q = q.like('key', prefix + '%');
         q = shared ? q.is('owner_id', null) : q.eq('owner_id', currentUser.id);

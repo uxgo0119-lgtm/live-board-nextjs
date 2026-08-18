@@ -12,7 +12,7 @@
     "lint": "next lint",
     "typecheck": "tsc --noEmit",
     "test:unit": "for f in $(find test/unit -name '*.test.ts' | sort); do echo \"--- $f ---\"; npx tsx \"$f\" || exit 1; done",
-    "test:release": "node public/test/index_html_phase1_fix_test.js && node public/test/sensor_master_p0_p1_verify.js && node public/test/room_roster_66_to_25_fix_verify.js && node public/test/phase1b_property_state_reset_verify.js && node public/ocr_confirm/test/apply_confirmed_to_lb_test.js && node public/ocr_intake/test/normalize_test.js",
+    "test:release": "node public/test/index_html_phase1_fix_test.js && node public/test/sensor_master_p0_p1_verify.js && node public/test/room_roster_66_to_25_fix_verify.js && node public/test/phase1b_property_state_reset_verify.js && node public/test/phase1c_property_scope_verify.js && node public/ocr_confirm/test/apply_confirmed_to_lb_test.js && node public/ocr_intake/test/normalize_test.js",
     "validate:batch": "tsx test/batch/runBatchValidation.ts",
     "ocr:benchmark": "tsx lib/ocr-benchmark/runBenchmark.ts",
     "ocr:compare": "tsx lib/ocr-compare/runCompare.ts"
