@@ -225,6 +225,9 @@ flag ONで問題が出た場合のrollback先が消える。
 
 1. 実端末（実Live Board）で dry-run を実行し、
    `contamination.detected` / 各statusの件数を実測する ← **未実施（要ユーザー操作）**
+   測定手段は実装済み: `public/test/phase1d_real_device_dryrun.html` を
+   Live Boardと同じオリジンで1回開くだけ（完全read-only）。
+   手順と実装内容は `docs/FireFlow_Phase1D_RealDevice_DryRun_2026-08-18.md` を参照。
 2. 実測結果で `contamination.detected === true` なら、
    部屋単位データは自動移行対象外。物件割当UI（Phase 1E相当）が先に必要。
 3. COLLISION が1件でも出た場合、その解決方針をユーザーが決める。
@@ -260,6 +263,8 @@ Phase 1A/1B/1C/outbox の既存テストは「新スコープ機構が正しく�
 |---|---|
 | `public/property_scope_migration.js` | 新規。純粋関数のみのmigration計画層（保存APIを構造的に持たない） |
 | `public/test/phase1d_property_scope_migration_dry_run_verify.js` | 新規。dry-run検証 94件 |
-| `package.json` | `test:release` へ Phase 1D テストを1行追加 |
+| `public/test/phase1d_real_device_dryrun.html` | 追加（2026-08-18）。実端末read-only測定ページ |
+| `public/test/phase1d_real_device_dryrun_page_verify.js` | 追加（2026-08-18）。測定ページ検証 64件 |
+| `package.json` | `test:release` へ Phase 1D テストを追加 |
 
 **製品コード（`public/index.html` / `public/supabase-integration.js` / `public/stamp_store/stamp_store.js` / `supabase/schema.sql`）は差分0。**

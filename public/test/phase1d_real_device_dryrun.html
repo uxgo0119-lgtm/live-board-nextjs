@@ -1,0 +1,512 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Phase 1D 実端末 dry-run（READ ONLY）</title>
+<!--
+  [2026-08-18新設 Phase 1D] 実端末データに対する property scope migration の dry-run。
+
+  【この画面が何であるか】
+  この端末のブラウザに実際に残っている保存データ(IndexedDB 'fireflow-lb-cache')を
+  **読むだけ**で読み取り、既存の純粋関数 planPropertyScopeMigration() へそのまま渡し、
+  「本migrationを実行したら何がどう分類されるか」を表示する。
+
+  【この画面がしないこと】
+  本migrationの実行・データの複写・旧キーの削除・propertyIdの付与・outboxの変更・
+  Supabaseへの送信を一切行わない。新しいmigrationロジックもここには書かない
+  (判定は /property_scope_migration.js の既存実装をそのまま呼ぶだけ)。
+
+  【read-onlyの担保】
+  「気をつける」ではなく、以下を起動直後に毒入り(poison)へ差し替えて構造的に封じる。
+    ・IDBDatabase.prototype.transaction … 'readwrite'を要求した時点で例外
+    ・IDBObjectStore.prototype.put/add/delete/clear … 呼んだ時点で例外
+    ・indexedDB.deleteDatabase / localStorage.setItem/removeItem/clear … 例外
+    ・fetch / XMLHttpRequest / sendBeacon … 例外(Supabaseへ一切出さない)
+  そのうえで dry-run の前後にIndexedDBを2回読み直し、全レコードのハッシュ一覧が
+  完全一致することを確認する。1件でも違えば DRYRUN_UNVERIFIED とする。
+
+  【DBを新規作成しないための配慮】
+  indexedDB.open() は存在しないDBを**作ってしまう**(＝書き込み)。したがって先に
+  indexedDB.databases() で存在を確認し、無ければ open せずに BLOCKED を返す。
+-->
+<style>
+  :root { color-scheme: light; }
+  body { font-family: -apple-system, BlinkMacSystemFont, "Hiragino Sans", sans-serif;
+         margin: 0; padding: 16px; background: #f5f6f8; color: #1a1a1a; line-height: 1.7; }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  .sub { color: #666; font-size: 13px; margin-bottom: 16px; }
+  .card { background: #fff; border: 1px solid #dfe3e8; border-radius: 10px; padding: 14px 16px; margin-bottom: 12px; }
+  .card h2 { font-size: 15px; margin: 0 0 10px; padding-bottom: 6px; border-bottom: 1px solid #eee; }
+  .verdict { font-size: 17px; font-weight: 700; padding: 12px 14px; border-radius: 10px; margin-bottom: 12px; }
+  .v-pass { background: #e7f6ec; border: 1px solid #2f9e5a; color: #14522f; }
+  .v-warn { background: #fff5e0; border: 1px solid #d99100; color: #6b4600; }
+  .v-stop { background: #fdeaea; border: 1px solid #c0392b; color: #7d211a; }
+  .v-run  { background: #eaf1fd; border: 1px solid #2f6fd0; color: #1a3f7d; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; }
+  th, td { border: 1px solid #e3e6ea; padding: 5px 8px; text-align: left; vertical-align: top; }
+  th { background: #f2f4f7; font-weight: 600; white-space: nowrap; }
+  td.n { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .zero { color: #999; }
+  .hit { font-weight: 700; color: #c0392b; }
+  code, .mono { font-family: ui-monospace, Menlo, monospace; font-size: 12px; word-break: break-all; }
+  button { font-size: 14px; padding: 9px 16px; border-radius: 8px; border: 1px solid #2f6fd0;
+           background: #2f6fd0; color: #fff; cursor: pointer; margin-right: 8px; }
+  button.ghost { background: #fff; color: #2f6fd0; }
+  pre { background: #1e2430; color: #e6edf3; padding: 12px; border-radius: 8px; overflow: auto;
+        max-height: 420px; font-size: 11px; line-height: 1.5; }
+  .note { font-size: 12px; color: #666; margin-top: 6px; }
+  ul { margin: 4px 0; padding-left: 20px; }
+  li { font-size: 13px; }
+</style>
+</head>
+<body>
+<h1>Phase 1D 実端末 dry-run（READ ONLY）</h1>
+<div class="sub">
+  この端末の実データを<strong>読むだけ</strong>で分類します。本migrationは実行しません。
+  データの複写・削除・propertyId付与・outbox変更・Supabase送信は構造的に封じてあります。
+</div>
+
+<div id="verdict" class="verdict v-run">実行中…</div>
+<div id="out"></div>
+
+<div class="card">
+  <h2>報告用データ</h2>
+  <button id="copyBtn">レポート全文をコピー</button>
+  <button id="dlBtn" class="ghost">JSONを保存</button>
+  <div class="note">コピーした内容をそのままClaude Codeへ貼り付ければ、実端末dry-runの実測値として扱えます。</div>
+  <pre id="json">…</pre>
+</div>
+
+<!-- 判定ロジックは既存の純粋関数をそのまま使う。この画面に新しいmigrationロジックは無い。 -->
+<script src="../property_scope_migration.js"></script>
+<script>
+'use strict';
+(function () {
+  var LC_DB_NAME = 'fireflow-lb-cache';   // index.html L4125 と同一
+  var WRITE_COUNT = 0, DELETE_COUNT = 0, NETWORK_COUNT = 0;
+  var blocked = [];
+
+  /* ==========================================================================
+     0. 書き込み経路を構造的に封じる（read-onlyの担保）
+     ここで差し替えた関数は「呼ばれたら数えて例外」。呼ばないことに依存しない。
+     ========================================================================== */
+  function record(kind, what) {
+    if (kind === 'delete') DELETE_COUNT++; else if (kind === 'net') NETWORK_COUNT++; else WRITE_COUNT++;
+    blocked.push(kind + ': ' + what);
+    throw new Error('READ_ONLY_VIOLATION: ' + what);
+  }
+  try {
+    var origTransaction = IDBDatabase.prototype.transaction;
+    IDBDatabase.prototype.transaction = function (stores, mode) {
+      if (mode !== undefined && mode !== 'readonly') record('write', 'IDBDatabase.transaction mode=' + mode);
+      return origTransaction.call(this, stores, 'readonly');   // 既定値も明示的にreadonlyへ固定
+    };
+    ['put', 'add'].forEach(function (m) {
+      IDBObjectStore.prototype[m] = function () { record('write', 'IDBObjectStore.' + m); };
+    });
+    ['delete', 'clear'].forEach(function (m) {
+      IDBObjectStore.prototype[m] = function () { record('delete', 'IDBObjectStore.' + m); };
+    });
+    indexedDB.deleteDatabase = function () { record('delete', 'indexedDB.deleteDatabase'); };
+    Storage.prototype.setItem = function () { record('write', 'localStorage.setItem'); };
+    Storage.prototype.removeItem = function () { record('delete', 'localStorage.removeItem'); };
+    Storage.prototype.clear = function () { record('delete', 'localStorage.clear'); };
+    window.fetch = function () { record('net', 'fetch'); };
+    XMLHttpRequest.prototype.open = function () { record('net', 'XMLHttpRequest.open'); };
+    if (navigator.sendBeacon) navigator.sendBeacon = function () { record('net', 'sendBeacon'); };
+  } catch (err) { /* 差し替えに失敗しても読み取り自体は続行し、下の前後比較で担保する */ }
+
+  var M = window.FireFlowPropertyScopeMigration;
+  var el = function (id) { return document.getElementById(id); };
+  function esc(s) { return String(s).replace(/[&<>]/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]; }); }
+  function n(v) { return '<td class="n' + (v ? '' : ' zero') + '">' + v + '</td>'; }
+
+  /* ==========================================================================
+     1. IndexedDBを「作らずに」読む
+     ========================================================================== */
+  function listDatabases() {
+    if (!indexedDB.databases) return Promise.resolve(null); // 非対応環境は存在確認ができない
+    return indexedDB.databases().then(function (list) { return list || []; }, function () { return null; });
+  }
+  function openReadOnly(name) {
+    return new Promise(function (resolve, reject) {
+      var req;
+      try { req = indexedDB.open(name); } catch (e) { reject(e); return; }   // versionを渡さない＝upgradeさせない
+      req.onupgradeneeded = function (e) {
+        // ここへ来た＝DBが存在しなかった。作らずに中断する。
+        try { e.target.transaction.abort(); } catch (err) {}
+        reject(new Error('DB_DID_NOT_EXIST'));
+      };
+      req.onsuccess = function (e) { resolve(e.target.result); };
+      req.onerror = function () { reject(new Error('DB_OPEN_FAILED')); };
+      req.onblocked = function () { reject(new Error('DB_BLOCKED_BY_OTHER_TAB')); };
+    });
+  }
+  function getAll(db, storeName) {
+    return new Promise(function (resolve) {
+      if (!db.objectStoreNames.contains(storeName)) { resolve([]); return; }
+      try {
+        var tx = db.transaction(storeName, 'readonly');
+        var req = tx.objectStore(storeName).getAll();
+        req.onsuccess = function () { resolve(req.result || []); };
+        req.onerror = function () { resolve([]); };
+      } catch (err) { resolve([]); }
+    });
+  }
+  // 前後比較用の指紋。値そのものを2重に保持しないので写真付きデータでも軽い。
+  function fingerprint(rows, keyField) {
+    return rows.map(function (r) {
+      return String(r && r[keyField]) + '|' + M.hashValue(r && r.value) + '|' + String(r && r.updatedAt);
+    }).sort().join('\n');
+  }
+
+  /* ==========================================================================
+     2. 集計（既存planの結果を数えるだけ。判定はしない）
+     ========================================================================== */
+  var DOMAIN_LABEL = {
+    propertyCurrent: 'current property record',
+    binder: 'binder',
+    scheduleOverride: 'schedule override',
+    equip: 'equipment',
+    ext: 'ext（消火器）',
+    presence: 'presence',
+    boTable: 'boTable',
+    documents: 'documents',
+    'property/buildingNotes': 'buildingNotes',
+    'property/progressLog': 'progressLog',
+    'property/siteSupervisor': 'siteSupervisor',
+    'property/scheduleDays': 'scheduleDays',
+    'property/equipmentList': 'equipmentList',
+  };
+  function countBy(list, pick) {
+    var out = Object.create(null);
+    list.forEach(function (x) { var k = pick(x); out[k] = (out[k] || 0) + 1; });
+    return out;
+  }
+  function tableFromCounts(counts, head, order) {
+    var keys = order || Object.keys(counts).sort();
+    var rows = keys.map(function (k) {
+      return '<tr><td>' + esc(k) + '</td>' + n(counts[k] || 0) + '</tr>';
+    }).join('');
+    return '<table><tr><th>' + head + '</th><th>件数</th></tr>' + rows + '</table>';
+  }
+  function sampleList(items, limit) {
+    return items.slice(0, limit).map(function (i) {
+      return '<li><code>' + esc(i.legacyKey || i.cacheKey) + '</code>'
+        + (i.propertyId ? ' → <code>' + esc(i.proposedScopedKey) + '</code>' : '')
+        + ' <span class="mono">[' + esc(i.evidence) + ']</span></li>';
+    }).join('') + (items.length > limit ? '<li>… 他 ' + (items.length - limit) + ' 件</li>' : '');
+  }
+
+  /* ==========================================================================
+     3. 実行
+     ========================================================================== */
+  function fail(verdict, cls, html, report) {
+    el('verdict').className = 'verdict ' + cls;
+    el('verdict').textContent = verdict;
+    el('out').innerHTML = html;
+    el('json').textContent = JSON.stringify(report || { verdict: verdict }, null, 2);
+  }
+
+  function run() {
+    var report = {
+      generatedBy: 'phase1d_real_device_dryrun.html',
+      migrationVersion: M ? M.MIGRATION_VERSION : null,
+      origin: location.origin,
+      href: location.href,
+      userAgent: navigator.userAgent,
+      executedAt: new Date().toISOString(),
+      realDeviceData: false,
+    };
+    if (!M || typeof M.planPropertyScopeMigration !== 'function') {
+      report.error = 'property_scope_migration.js を読み込めませんでした';
+      fail('REAL_DEVICE_DRYRUN_BLOCKED', 'v-stop',
+        '<div class="card"><h2>判定不能</h2><p>/property_scope_migration.js を読み込めませんでした。'
+        + 'このページはLive Boardと同じオリジンから開いてください。</p></div>', report);
+      return;
+    }
+
+    listDatabases().then(function (dbs) {
+      report.indexedDBDatabases = dbs === null ? 'UNSUPPORTED(indexedDB.databases)' : dbs.map(function (d) { return d.name; });
+      if (dbs === null) {
+        report.error = 'indexedDB.databases() 非対応。DBを新規作成せずに存在確認ができないため中止しました。';
+        fail('REAL_DEVICE_DRYRUN_BLOCKED', 'v-stop',
+          '<div class="card"><h2>判定不能</h2><p>このブラウザは <code>indexedDB.databases()</code> に対応していません。'
+          + 'DBを勝手に作らずに存在確認ができないため、安全側で中止しました。'
+          + 'Chrome か Safari 14以降で開き直してください。</p></div>', report);
+        return null;
+      }
+      var found = dbs.some(function (d) { return d.name === LC_DB_NAME; });
+      report.dbFound = found;
+      if (!found) {
+        report.error = 'このオリジンに ' + LC_DB_NAME + ' が存在しません。';
+        fail('REAL_DEVICE_DRYRUN_BLOCKED', 'v-stop',
+          '<div class="card"><h2>このオリジンに実データがありません</h2>'
+          + '<p>現在のオリジン <code>' + esc(location.origin) + '</code> に IndexedDB <code>' + LC_DB_NAME + '</code> がありません。'
+          + '（DBを勝手に作らないため、開かずに中止しました。）</p>'
+          + '<p>存在したDB: <code>' + esc(JSON.stringify(report.indexedDBDatabases)) + '</code></p>'
+          + '<p><strong>実際にLive Boardを使っているURLと同じオリジン</strong>でこのページを開き直してください。'
+          + '（例: <code>http://localhost:3000/test/phase1d_real_device_dryrun.html</code> / '
+          + '<code>https://&lt;本番ドメイン&gt;/test/phase1d_real_device_dryrun.html</code>）</p></div>', report);
+        return null;
+      }
+      return openReadOnly(LC_DB_NAME);
+    }).then(function (db) {
+      if (!db) return;
+      report.realDeviceData = true;
+      report.dbVersion = db.version;
+      report.objectStores = Array.prototype.slice.call(db.objectStoreNames);
+
+      return Promise.all([getAll(db, 'cache'), getAll(db, 'outbox')]).then(function (before) {
+        var cache = before[0], outbox = before[1];
+        var fpCacheBefore = fingerprint(cache, 'key');
+        var fpOutboxBefore = fingerprint(outbox, 'key');
+        var cacheCountBefore = cache.length, outboxCountBefore = outbox.length;
+
+        // ---- 既存の純粋関数をそのまま呼ぶ（新ロジックなし） ----
+        // currentPropertyId は渡さない。「今開いている物件だから」は D_WEAK であり、
+        // 単独では移行根拠にならない（Phase 1D設計 §3）。
+        var plan = M.planPropertyScopeMigration({
+          cacheEntries: cache, outboxEntries: outbox, currentPropertyId: null,
+        });
+
+        // ---- dry-run後にもう一度読み直して、1バイトも変わっていないことを確認 ----
+        return Promise.all([getAll(db, 'cache'), getAll(db, 'outbox')]).then(function (after) {
+          var cacheAfter = after[0], outboxAfter = after[1];
+          var unchanged =
+            cacheAfter.length === cacheCountBefore &&
+            outboxAfter.length === outboxCountBefore &&
+            fingerprint(cacheAfter, 'key') === fpCacheBefore &&
+            fingerprint(outboxAfter, 'key') === fpOutboxBefore;
+
+          render(plan, {
+            cacheCountBefore: cacheCountBefore, cacheCountAfter: cacheAfter.length,
+            outboxCountBefore: outboxCountBefore, outboxCountAfter: outboxAfter.length,
+            unchanged: unchanged,
+          }, report);
+        });
+      });
+    }).catch(function (err) {
+      report.error = String(err && err.message || err);
+      var msg = report.error === 'DB_DID_NOT_EXIST'
+        ? 'このオリジンに保存データがありませんでした（DBは作らずに中断しました）。'
+        : report.error === 'DB_BLOCKED_BY_OTHER_TAB'
+          ? 'Live Boardを開いている別のタブがDBを掴んでいます。他のタブを閉じてから開き直してください。'
+          : 'IndexedDBを読み取れませんでした: ' + esc(report.error);
+      fail('REAL_DEVICE_DRYRUN_BLOCKED', 'v-stop', '<div class="card"><h2>判定不能</h2><p>' + msg + '</p></div>', report);
+    });
+  }
+
+  function render(plan, io, report) {
+    var items = plan.items;
+    var scoped = items.filter(function (i) {
+      return i.status !== 'SKIPPED_NON_PROPERTY_DATA' && i.status !== 'SKIPPED_PHASE1E';
+    });
+    var byStatus = plan.summary;
+    var byEvidenceAll = countBy(items, function (i) { return i.evidence; });
+    var byEvidenceScoped = countBy(scoped, function (i) { return i.evidence; });
+    var migratable = items.filter(function (i) { return i.status === 'MIGRATABLE'; });
+    var ambiguous = items.filter(function (i) { return i.status === 'AMBIGUOUS'; });
+    var unknown = items.filter(function (i) { return i.status === 'UNKNOWN_PROPERTY'; });
+    var collision = items.filter(function (i) { return i.status === 'COLLISION'; });
+    var invalid = items.filter(function (i) { return i.status === 'INVALID'; });
+    var stampItems = items.filter(function (i) { return i.status === 'SKIPPED_PHASE1E'; });
+
+    // domain別（statusまで割る）
+    var domainRows = Object.create(null);
+    items.forEach(function (i) {
+      var key = i.domain || (i.status === 'SKIPPED_PHASE1E' ? 'StampStore(対象外)' : '対象外/その他');
+      if (i.status === 'SKIPPED_PHASE1E') key = 'StampStore(対象外)';
+      else if (i.status === 'SKIPPED_NON_PROPERTY_DATA' && !i.domain) key = '端末設定・対象外キー';
+      var label = DOMAIN_LABEL[key] || key;
+      var r = domainRows[label] || (domainRows[label] = { total: 0, MIGRATABLE: 0, ALREADY_MIGRATED: 0, COLLISION: 0, AMBIGUOUS: 0, UNKNOWN_PROPERTY: 0, INVALID: 0, SKIPPED: 0 });
+      r.total++;
+      if (r[i.status] !== undefined) r[i.status]++; else r.SKIPPED++;
+    });
+
+    // 複数物件の痕跡（既に付いているpropertyIdが2種類以上あるか）
+    var pids = Object.create(null);
+    items.forEach(function (i) { if (i.propertyId) pids[i.propertyId] = (pids[i.propertyId] || 0) + 1; });
+    var pidList = Object.keys(pids);
+
+    // 弱い根拠での移行が0件であること（設計上の不変条件の実データ確認）
+    var weakMigratable = migratable.filter(function (i) {
+      return i.evidence === 'D_WEAK' || i.evidence === 'E_UNKNOWN';
+    });
+
+    var writeOk = (WRITE_COUNT === 0 && DELETE_COUNT === 0 && NETWORK_COUNT === 0 &&
+      plan.writeCount === 0 && plan.deleteCount === 0 && io.unchanged);
+
+    // ---- 判定 ----
+    var verdict, cls, migrationDecision, decisionReason = [];
+    if (!writeOk) {
+      verdict = 'REAL_DEVICE_DRYRUN_UNVERIFIED'; cls = 'v-stop';
+      migrationDecision = 'STOP';
+      decisionReason.push('dry-runのread-only性を証明できなかった');
+    } else if (weakMigratable.length > 0) {
+      verdict = 'REAL_DEVICE_DRYRUN_UNVERIFIED'; cls = 'v-stop';
+      migrationDecision = 'STOP';
+      decisionReason.push('D_WEAK/E_UNKNOWN根拠のみでMIGRATABLEになった項目がある（設計違反）');
+    } else if (plan.contamination.detected || byStatus.AMBIGUOUS > 0 ||
+               byStatus.UNKNOWN_PROPERTY > 0 || byStatus.COLLISION > 0) {
+      verdict = 'REAL_DEVICE_DRYRUN_AMBIGUOUS'; cls = 'v-warn';
+      migrationDecision = 'STOP';
+      if (plan.contamination.detected) decisionReason.push('複数建物の混在痕跡(orphan)がある');
+      if (byStatus.COLLISION > 0) decisionReason.push('COLLISIONの解決方針を人が決める必要がある');
+      if (byStatus.UNKNOWN_PROPERTY > 0) decisionReason.push('propertyIdを確定できないデータがある（物件割当UI＝Phase 1E相当が先）');
+      if (byStatus.AMBIGUOUS > 0) decisionReason.push('一意に割当できないデータがある');
+    } else {
+      verdict = 'REAL_DEVICE_DRYRUN_PASS'; cls = 'v-pass';
+      // 最善でも CONDITIONAL_GO 止まり。設計書 §6 の kv_store 旧key行の扱いが未確定のため。
+      migrationDecision = byStatus.MIGRATABLE > 0 ? 'MIGRATION_EXECUTION_CONDITIONAL_GO' : 'STOP';
+      if (byStatus.MIGRATABLE === 0) decisionReason.push('移行対象が0件のため、本migrationを実行する意味がない');
+      else decisionReason.push('設計書§6のkv_store旧key行の扱い（残す期間・削除条件）が未確定のため、実行前に人の決定が必要');
+    }
+
+    el('verdict').className = 'verdict ' + cls;
+    el('verdict').textContent = verdict + ' ／ 本migration判定: ' + migrationDecision + '（今回は実行しません）';
+
+    var h = '';
+
+    h += '<div class="card"><h2>0. 実行環境</h2><table>'
+      + '<tr><th>オリジン</th><td><code>' + esc(location.origin) + '</code></td></tr>'
+      + '<tr><th>IndexedDB</th><td><code>' + esc(report.indexedDBDatabases.join(', ')) + '</code></td></tr>'
+      + '<tr><th>objectStore</th><td><code>' + esc((report.objectStores || []).join(', ')) + '</code></td></tr>'
+      + '<tr><th>migration version</th><td><code>' + esc(plan.version) + '</code></td></tr>'
+      + '</table></div>';
+
+    h += '<div class="card"><h2>1. 書き込みゼロ証明</h2><table>'
+      + '<tr><th>WRITE COUNT</th>' + n(WRITE_COUNT) + '</tr>'
+      + '<tr><th>DELETE COUNT</th>' + n(DELETE_COUNT) + '</tr>'
+      + '<tr><th>ネットワーク送信</th>' + n(NETWORK_COUNT) + '</tr>'
+      + '<tr><th>plan自己申告 writeCount</th>' + n(plan.writeCount) + '</tr>'
+      + '<tr><th>plan自己申告 deleteCount</th>' + n(plan.deleteCount) + '</tr>'
+      + '<tr><th>IndexedDB cache 件数（前 → 後）</th><td class="n">' + io.cacheCountBefore + ' → ' + io.cacheCountAfter + '</td></tr>'
+      + '<tr><th>outbox 件数（前 → 後）</th><td class="n">' + io.outboxCountBefore + ' → ' + io.outboxCountAfter + '</td></tr>'
+      + '<tr><th>全レコード指紋の前後一致</th><td>' + (io.unchanged ? '一致（変更0件）' : '<span class="hit">不一致</span>') + '</td></tr>'
+      + '</table>'
+      + (blocked.length ? '<p class="hit">遮断した書き込み試行: ' + esc(blocked.join(' / ')) + '</p>' : '')
+      + '<div class="note">Supabase kv_store はこの画面から一切参照・変更していません（fetch/XHRを封じています）。</div>'
+      + '</div>';
+
+    h += '<div class="card"><h2>2. contamination（複数建物の混在）</h2><table>'
+      + '<tr><th>contamination.detected</th><td>' + (plan.contamination.detected ? '<span class="hit">true</span>' : 'false') + '</td></tr>'
+      + '<tr><th>orphan key 件数</th>' + n(plan.contamination.orphanKeys.length) + '</tr>'
+      + '<tr><th>policy</th><td><code>' + esc(plan.contamination.policy) + '</code></td></tr>'
+      + '<tr><th>単一スコープ不変条件(B)</th><td>' + (plan.invariant.applied ? '成立 / ' : '<span class="hit">不成立</span> / ')
+      + '<code>' + esc(String(plan.invariant.propertyId)) + '</code></td></tr>'
+      + '<tr><th>データ中に現れたpropertyId</th><td><code>' + esc(pidList.length ? pidList.join(', ') : 'なし') + '</code>'
+      + (pidList.length > 1 ? ' <span class="hit">（複数物件の痕跡）</span>' : '') + '</td></tr>'
+      + '</table>'
+      + (plan.contamination.orphanKeys.length
+        ? '<p>orphan（現物件レコードの部屋/設備一覧に無い旧キー）:</p><ul>'
+          + plan.contamination.orphanKeys.slice(0, 30).map(function (k) { return '<li><code>' + esc(k) + '</code></li>'; }).join('')
+          + (plan.contamination.orphanKeys.length > 30 ? '<li>… 他 ' + (plan.contamination.orphanKeys.length - 30) + ' 件</li>' : '')
+          + '</ul>' : '')
+      + '</div>';
+
+    h += '<div class="card"><h2>3. status別件数（cache 全 ' + items.length + ' 件）</h2>'
+      + tableFromCounts(byStatus, 'status',
+        ['MIGRATABLE', 'ALREADY_MIGRATED', 'COLLISION', 'AMBIGUOUS', 'UNKNOWN_PROPERTY', 'INVALID',
+         'SKIPPED_NON_PROPERTY_DATA', 'SKIPPED_PHASE1E'])
+      + '<h2 style="margin-top:14px">outbox（' + io.outboxCountBefore + ' 件・変更0件）</h2>'
+      + tableFromCounts(plan.outboxSummary, 'outbox status',
+        ['ALREADY_SCOPED', 'MIGRATABLE', 'NEEDS_USER_ASSIGNMENT', 'INVALID', 'SKIPPED_NON_PROPERTY_DATA'])
+      + '</div>';
+
+    var dKeys = Object.keys(domainRows).sort();
+    h += '<div class="card"><h2>4. domain別件数</h2><table>'
+      + '<tr><th>domain</th><th>合計</th><th>MIGRATABLE</th><th>ALREADY</th><th>COLLISION</th><th>AMBIGUOUS</th><th>UNKNOWN</th><th>INVALID</th><th>SKIP</th></tr>'
+      + dKeys.map(function (k) {
+        var r = domainRows[k];
+        return '<tr><td>' + esc(k) + '</td>' + n(r.total) + n(r.MIGRATABLE) + n(r.ALREADY_MIGRATED)
+          + n(r.COLLISION) + n(r.AMBIGUOUS) + n(r.UNKNOWN_PROPERTY) + n(r.INVALID) + n(r.SKIPPED) + '</tr>';
+      }).join('') + '</table></div>';
+
+    h += '<div class="card"><h2>5. propertyId evidence別件数</h2>'
+      + '<table><tr><th>evidence</th><th>スコープ対象キーのみ</th><th>全キー</th></tr>'
+      + ['A_RECORD_PROPERTY_ID', 'B_SINGLE_SCOPE_INVARIANT', 'C_MEMBERSHIP', 'D_WEAK', 'E_UNKNOWN'].map(function (e) {
+        return '<tr><td>' + e + '</td>' + n(byEvidenceScoped[e] || 0) + n(byEvidenceAll[e] || 0) + '</tr>';
+      }).join('') + '</table>'
+      + '<p>D_WEAK / E_UNKNOWN のみでMIGRATABLEになった項目: <strong'
+      + (weakMigratable.length ? ' class="hit"' : '') + '>' + weakMigratable.length + ' 件</strong>'
+      + (weakMigratable.length ? '（設計違反）' : '（設計どおり0件）') + '</p></div>';
+
+    h += '<div class="card"><h2>6. 各一覧の概要</h2>'
+      + '<p><strong>MIGRATABLE（' + migratable.length + ' 件）</strong></p><ul>' + (migratable.length ? sampleList(migratable, 25) : '<li>なし</li>') + '</ul>'
+      + '<p><strong>AMBIGUOUS（' + ambiguous.length + ' 件）</strong></p><ul>' + (ambiguous.length ? sampleList(ambiguous, 25) : '<li>なし</li>') + '</ul>'
+      + '<p><strong>UNKNOWN_PROPERTY（' + unknown.length + ' 件）</strong></p><ul>' + (unknown.length ? sampleList(unknown, 25) : '<li>なし</li>') + '</ul>'
+      + '<p><strong>COLLISION（' + collision.length + ' 件）</strong></p><ul>' + (collision.length ? sampleList(collision, 25) : '<li>なし</li>') + '</ul>'
+      + '<p><strong>INVALID（' + invalid.length + ' 件）</strong></p><ul>' + (invalid.length ? sampleList(invalid, 25) : '<li>なし</li>') + '</ul>'
+      + '<p><strong>StampStore（' + stampItems.length + ' 件・Phase 1D対象外／件数確認のみ）</strong></p><ul>'
+      + (stampItems.length ? sampleList(stampItems, 15) : '<li>なし</li>') + '</ul></div>';
+
+    h += '<div class="card"><h2>7. 本migration判定</h2>'
+      + '<table><tr><th>dry-run判定</th><td><strong>' + verdict + '</strong></td></tr>'
+      + '<tr><th>本migration判定</th><td><strong>' + migrationDecision + '</strong></td></tr></table>'
+      + '<ul>' + decisionReason.map(function (r) { return '<li>' + esc(r) + '</li>'; }).join('') + '</ul>'
+      + '<p class="note">GOであってもこの画面は本migrationを実行しません（実行機能自体を持っていません）。</p></div>';
+
+    el('out').innerHTML = h;
+
+    // ---- 報告用JSON（値そのものは含めない。キーと分類だけ） ----
+    report.verdict = verdict;
+    report.migrationDecision = migrationDecision;
+    report.migrationDecisionReason = decisionReason;
+    report.writeCount = WRITE_COUNT;
+    report.deleteCount = DELETE_COUNT;
+    report.networkCount = NETWORK_COUNT;
+    report.planWriteCount = plan.writeCount;
+    report.planDeleteCount = plan.deleteCount;
+    report.io = io;
+    report.contamination = {
+      detected: plan.contamination.detected,
+      policy: plan.contamination.policy,
+      orphanKeys: plan.contamination.orphanKeys,
+    };
+    report.invariant = plan.invariant;
+    report.propertyIdsSeen = pids;
+    report.statusCounts = byStatus;
+    report.outboxStatusCounts = plan.outboxSummary;
+    report.domainCounts = domainRows;
+    report.evidenceCountsScoped = byEvidenceScoped;
+    report.evidenceCountsAll = byEvidenceAll;
+    report.weakEvidenceMigratableCount = weakMigratable.length;
+    function brief(list) {
+      return list.map(function (i) {
+        return { legacyKey: i.legacyKey, domain: i.domain, evidence: i.evidence,
+                 collision: i.collision, propertyId: i.propertyId,
+                 proposedScopedKey: i.proposedScopedKey, reason: i.reason };
+      });
+    }
+    report.migratable = brief(migratable);
+    report.ambiguous = brief(ambiguous);
+    report.unknownProperty = brief(unknown);
+    report.collision = brief(collision);
+    report.invalid = brief(invalid);
+    report.stampStore = { count: stampItems.length, keys: stampItems.map(function (i) { return i.legacyKey; }) };
+    report.outbox = plan.outbox.map(function (o) {
+      return { rawKey: o.rawKey, status: o.status, propertyId: o.propertyId, mutated: o.mutated };
+    });
+    el('json').textContent = JSON.stringify(report, null, 2);
+    window.__phase1dReport = report;
+  }
+
+  el('copyBtn').addEventListener('click', function () {
+    var text = el('json').textContent;
+    if (navigator.clipboard) navigator.clipboard.writeText(text).then(function () { el('copyBtn').textContent = 'コピーしました'; });
+  });
+  el('dlBtn').addEventListener('click', function () {
+    var blob = new Blob([el('json').textContent], { type: 'application/json' });
+    var a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = 'phase1d_real_device_dryrun.json';
+    a.click();
+  });
+
+  run();
+})();
+</script>
+</body>
+</html>
