@@ -11,13 +11,19 @@
         （Supabaseダッシュボード → Project Settings → API で確認できます）
      3. Supabaseダッシュボード → Authentication → Providers で
         Email（パスワードでのログイン）を有効にする
-     4. 物件（properties）を1件作成し、その物件IDを PROPERTY_ID に設定する
+     4. 物件（properties）を1件作成し、その物件IDを INITIAL_PROPERTY_ID に設定する
         （SQL Editorで: insert into properties (name) values ('物件名') returning id;）
 ============================================================================ */
 
 const SUPABASE_URL = 'https://trtivspdgekofiglfyls.supabase.co';
 const SUPABASE_ANON_KEY = 'sb_publishable_hMU5PaVb113q-5iPkuPyxA_Gvbm1zPm';
-const PROPERTY_ID = 'b6e18eed-f2f3-4674-812d-322732908616'; // コスモ六甲ガーデンフォート
+
+// [2026-08-17 Phase 1A] 固定定数 `const PROPERTY_ID` を廃止し、実行時変数 currentPropertyId
+// （下のIIFE内）へ一本化した。Phase 1AはpropertyIdの「土台」だけを入れるフェーズであり、
+// Live Boardの現在の挙動を1つも変えないことが成功条件なので、currentPropertyId の初期値は
+// 従来の固定UUIDと完全に同じ値のままにしてある（保存先・読込先はPhase 1A前後で不変）。
+// 物件切替（setCurrentPropertyId()を実際に呼ぶ経路）はPhase 1C/1Eで追加する。
+const INITIAL_PROPERTY_ID = 'b6e18eed-f2f3-4674-812d-322732908616'; // コスモ六甲ガーデンフォート
 
 (function () {
   'use strict';
@@ -44,6 +50,37 @@ const PROPERTY_ID = 'b6e18eed-f2f3-4674-812d-322732908616'; // コスモ六甲�
   var sb = null;
   var currentUser = null;
   var currentInspectionId = null; // その日の inspections.id（ログイン後に取得/作成）
+
+  /* ---------------------------------------------------------------------
+     0. propertyId（[2026-08-17 Phase 1A] 物件スコープの土台）
+        正本は Supabase の properties.id。Live Board側で別の独自物件IDは発行しない。
+        propertyIdは不変で、物件名・住所・点検日・部屋一覧・設備・感知器数が変わっても
+        変更しない（PROPERTY.name は表示名であり識別子ではない）。
+
+        Phase 1Aでは初期値を従来の固定UUIDのまま据え置くため、この変数の導入によって
+        保存先／読込先のproperty_idは1件も変化しない。Realtimeの再購読・storageへの
+        明示propertyId引数・outbox対応・物件切替UIはPhase 1C/1Eの担当で、ここでは扱わない。
+     --------------------------------------------------------------------- */
+  var currentPropertyId = INITIAL_PROPERTY_ID;
+
+  // UUID v4（小文字・36文字）だけを受け付ける。Supabaseの gen_random_uuid() と
+  // ブラウザの crypto.randomUUID() が生成する形式に合わせている。
+  var UUID_V4_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+  function isValidPropertyId(value) {
+    return typeof value === 'string' && value.length === 36 && UUID_V4_RE.test(value);
+  }
+
+  // currentPropertyId を変更してよい唯一の経路。null・空文字・UUID形式でない値は
+  // 拒否し、その場合でも現在値は破壊しない（false を返すだけ）。
+  function setCurrentPropertyId(propertyId) {
+    if (!isValidPropertyId(propertyId)) return false;
+    currentPropertyId = propertyId;
+    return true;
+  }
+
+  window.getCurrentPropertyId = function () { return currentPropertyId; };
+  window.setCurrentPropertyId = setCurrentPropertyId;
+  window.isValidPropertyId = isValidPropertyId;
 
   function initSupabaseIntegration() {
     sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
@@ -230,12 +267,12 @@ const PROPERTY_ID = 'b6e18eed-f2f3-4674-812d-322732908616'; // コスモ六甲�
     try {
       var today = new Date();
       var dateStr = today.getFullYear() + '-' + String(today.getMonth() + 1).padStart(2, '0') + '-' + String(today.getDate()).padStart(2, '0');
-      var { data: existing, error: selError } = await sb.from('inspections').select('id').eq('property_id', PROPERTY_ID).eq('inspection_date', dateStr).maybeSingle();
+      var { data: existing, error: selError } = await sb.from('inspections').select('id').eq('property_id', currentPropertyId).eq('inspection_date', dateStr).maybeSingle();
       if (selError) throw selError;
       if (existing) {
         currentInspectionId = existing.id;
       } else {
-        var { data: created, error } = await sb.from('inspections').insert({ property_id: PROPERTY_ID, inspection_date: dateStr }).select('id').single();
+        var { data: created, error } = await sb.from('inspections').insert({ property_id: currentPropertyId, inspection_date: dateStr }).select('id').single();
         if (error) throw error;
         currentInspectionId = created.id;
       }
@@ -260,7 +297,7 @@ const PROPERTY_ID = 'b6e18eed-f2f3-4674-812d-322732908616'; // コスモ六甲�
   function installStorageShim() {
     window.storage = {
       async get(key, shared) {
-        var q = sb.from('kv_store').select('value').eq('property_id', PROPERTY_ID).eq('key', key).eq('shared', !!shared);
+        var q = sb.from('kv_store').select('value').eq('property_id', currentPropertyId).eq('key', key).eq('shared', !!shared);
         q = shared ? q.is('owner_id', null) : q.eq('owner_id', currentUser.id);
         var { data, error } = await q.maybeSingle();
         if (error) throw error;
@@ -274,7 +311,7 @@ const PROPERTY_ID = 'b6e18eed-f2f3-4674-812d-322732908616'; // コスモ六甲�
         // バグがありました（2回目の保存以降、get()が「行が複数ヒットする」エラーで
         // 壊れます）。ここでは先にselectして、あれば更新・なければ新規作成する
         // 手動upsertに変更しています。
-        var q = sb.from('kv_store').select('id').eq('property_id', PROPERTY_ID).eq('key', key).eq('shared', !!shared);
+        var q = sb.from('kv_store').select('id').eq('property_id', currentPropertyId).eq('key', key).eq('shared', !!shared);
         q = shared ? q.is('owner_id', null) : q.eq('owner_id', currentUser.id);
         var { data: existing, error: selError } = await q.maybeSingle();
         if (selError) return null;
@@ -286,7 +323,7 @@ const PROPERTY_ID = 'b6e18eed-f2f3-4674-812d-322732908616'; // コスモ六甲�
           if (updError) return null;
         } else {
           var row = {
-            property_id: PROPERTY_ID, key: key, value: String(value), shared: !!shared,
+            property_id: currentPropertyId, key: key, value: String(value), shared: !!shared,
             owner_id: shared ? null : currentUser.id, updated_at: new Date().toISOString(),
           };
           var { error: insError } = await sb.from('kv_store').insert(row);
@@ -295,14 +332,14 @@ const PROPERTY_ID = 'b6e18eed-f2f3-4674-812d-322732908616'; // コスモ六甲�
         return { key: key, value: value, shared: !!shared };
       },
       async delete(key, shared) {
-        var q = sb.from('kv_store').delete().eq('property_id', PROPERTY_ID).eq('key', key).eq('shared', !!shared);
+        var q = sb.from('kv_store').delete().eq('property_id', currentPropertyId).eq('key', key).eq('shared', !!shared);
         q = shared ? q.is('owner_id', null) : q.eq('owner_id', currentUser.id);
         var { error } = await q;
         if (error) return null;
         return { key: key, deleted: true, shared: !!shared };
       },
       async list(prefix, shared) {
-        var q = sb.from('kv_store').select('key').eq('property_id', PROPERTY_ID).eq('shared', !!shared);
+        var q = sb.from('kv_store').select('key').eq('property_id', currentPropertyId).eq('shared', !!shared);
         if (prefix) q = q.like('key', prefix + '%');
         q = shared ? q.is('owner_id', null) : q.eq('owner_id', currentUser.id);
         var { data, error } = await q;
@@ -334,7 +371,7 @@ const PROPERTY_ID = 'b6e18eed-f2f3-4674-812d-322732908616'; // コスモ六甲�
     });
 
     channel.on('postgres_changes',
-      { event: '*', schema: 'public', table: 'kv_store', filter: 'property_id=eq.' + PROPERTY_ID },
+      { event: '*', schema: 'public', table: 'kv_store', filter: 'property_id=eq.' + currentPropertyId },
       function (payload) {
         document.dispatchEvent(new CustomEvent('sb-realtime-update', { detail: { table: 'kv_store', payload: payload } }));
         if (typeof window.onRealtimeUpdate === 'function') window.onRealtimeUpdate('kv_store', payload);
@@ -354,7 +391,7 @@ const PROPERTY_ID = 'b6e18eed-f2f3-4674-812d-322732908616'; // コスモ六甲�
     // meta: { room, tag, memo, equipmentName, extinguisherNo }
     var blob = await (await fetch(dataUrl)).blob();
     var ext = (blob.type.split('/')[1] || 'jpg').replace('jpeg', 'jpg');
-    var path = PROPERTY_ID + '/' + (meta.room || 'common') + '/' + Date.now() + '-' + Math.random().toString(36).slice(2, 8) + '.' + ext;
+    var path = currentPropertyId + '/' + (meta.room || 'common') + '/' + Date.now() + '-' + Math.random().toString(36).slice(2, 8) + '.' + ext;
 
     var { error: uploadError } = await sb.storage.from('inspection-photos').upload(path, blob, { contentType: blob.type });
     if (uploadError) throw uploadError;
@@ -435,7 +472,7 @@ const PROPERTY_ID = 'b6e18eed-f2f3-4674-812d-322732908616'; // コスモ六甲�
   window.getMyPropertyRole = async function () {
     if (!currentUser) return null;
     var { data, error } = await sb.from('property_members')
-      .select('role').eq('property_id', PROPERTY_ID).eq('user_id', currentUser.id).maybeSingle();
+      .select('role').eq('property_id', currentPropertyId).eq('user_id', currentUser.id).maybeSingle();
     if (error || !data) return null;
     return data.role;
   };
@@ -443,7 +480,7 @@ const PROPERTY_ID = 'b6e18eed-f2f3-4674-812d-322732908616'; // コスモ六甲�
   window.createPropertyInvite = async function (role, expiresInDays, maxUses) {
     if (!currentUser) throw new Error('ログインしていません。');
     var payload = {
-      property_id: PROPERTY_ID,
+      property_id: currentPropertyId,
       role: role || 'inspector',
       created_by: currentUser.id,
       expires_at: expiresInDays ? new Date(Date.now() + expiresInDays * 86400000).toISOString() : null,
@@ -457,7 +494,7 @@ const PROPERTY_ID = 'b6e18eed-f2f3-4674-812d-322732908616'; // コスモ六甲�
   window.listPropertyInvites = async function () {
     var { data, error } = await sb.from('property_invites')
       .select('id, role, created_at, expires_at, revoked_at, max_uses, use_count')
-      .eq('property_id', PROPERTY_ID)
+      .eq('property_id', currentPropertyId)
       .order('created_at', { ascending: false });
     if (error) return []; // 管理者でなければRLSにより空(=見えない)が正しい挙動
     return (data || []).map(function (row) {
@@ -468,5 +505,64 @@ const PROPERTY_ID = 'b6e18eed-f2f3-4674-812d-322732908616'; // コスモ六甲�
   window.revokePropertyInvite = async function (inviteId) {
     var { error } = await sb.from('property_invites').update({ revoked_at: new Date().toISOString() }).eq('id', inviteId);
     if (error) throw error;
+  };
+
+  /* ---------------------------------------------------------------------
+     8. 物件の作成・一覧（[2026-08-17 Phase 1A] 基盤のみ。まだ誰も呼んでいない）
+
+     この2関数はPhase 1E（物件切替UI・物件一覧UI）が使うための土台で、Phase 1Aでは
+     LB本体のどのUI（createNewProperty() 等）からも接続していない。接続していないので、
+     この追加によって現在のLive Boardの挙動は1つも変わらない。
+
+     既存schema（properties / property_members）とRLSだけで成立することを確認済み:
+       - properties_insert_authenticated … with check (created_by = auth.uid())
+         → ログイン中ユーザー自身をcreated_byにすればinsertできる。DB変更不要。
+       - trg_auto_admin_on_property_create … 物件作成者を自動でadminとして
+         property_membersへ登録する（招待なしで参加できる唯一の経路）。
+       - properties_select_members … 自分がメンバーの物件だけがselectで返る。
+         → listMyProperties()は「所属物件の一覧」をRLSだけで実現でき、新テーブルは不要。
+     --------------------------------------------------------------------- */
+
+  // オンライン前提。UUIDはクライアントで発行し、それをそのまま properties.id として
+  // insertする（LB独自IDとSupabase IDの二重管理を作らないため）。insertに失敗した場合は
+  // 例外を投げ、呼び出し側のローカルPROPERTYへは何も反映させない。
+  //
+  // insert時に .select() を付けていないのは意図的。properties のSELECTポリシーは
+  // 「property_membersに自分がいること」を要求するが、その行を作るのはAFTER INSERTの
+  // トリガーであり、同一INSERT文のRETURNINGがそれを見られる保証がない。idはこちらで
+  // 発行済みなので、DBから読み返す必要そのものが無い。
+  window.createProperty = async function (fields) {
+    if (!sb) throw new Error('Supabaseが初期化されていません。');
+    if (!currentUser) throw new Error('ログインしていません。');
+    var name = (fields && fields.name != null) ? String(fields.name).trim() : '';
+    if (!name) throw new Error('物件名は必須です。');
+    if (!(window.crypto && typeof window.crypto.randomUUID === 'function')) {
+      throw new Error('この環境では物件IDを発行できません（crypto.randomUUID未対応）。');
+    }
+    var propertyId = window.crypto.randomUUID();
+    if (!isValidPropertyId(propertyId)) throw new Error('物件IDの発行に失敗しました。');
+
+    var address = (fields && fields.address != null && String(fields.address).trim() !== '')
+      ? String(fields.address).trim() : null;
+    var { error } = await sb.from('properties').insert({
+      id: propertyId,
+      name: name,
+      address: address,
+      created_by: currentUser.id,
+    });
+    if (error) throw error; // 失敗時はpropertyIdを「使ってよいID」として返さない
+
+    return { id: propertyId, name: name, address: address };
+  };
+
+  // ログイン中ユーザーが所属する物件の一覧。RLS（properties_select_members）により
+  // 自分がメンバーの物件だけが返る。Phase 1AではUIへ接続しない。
+  window.listMyProperties = async function () {
+    if (!sb || !currentUser) return [];
+    var { data, error } = await sb.from('properties')
+      .select('id, name, address, created_at')
+      .order('created_at', { ascending: false });
+    if (error) return [];
+    return data || [];
   };
 })();

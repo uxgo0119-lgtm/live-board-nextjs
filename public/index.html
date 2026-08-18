@@ -4022,6 +4022,16 @@
   var EQUIPMENT_LIST = ['消火器具', '粉末消火設備', '共同住宅用自動火災報知設備', '避難器具', '連結送水管（共同住宅用連結送水管）', '防排煙制御設備'];
   var _today = new Date();
   var PROPERTY = {
+    // [2026-08-17 Phase 1A] 物件の識別子。正本はSupabaseの properties.id で、LB側では
+    // 別の独自IDを発行しない。propertyIdは不変で、物件名・住所・点検日・部屋一覧・設備・
+    // 感知器数が変わっても変更しない（PROPERTY.name は表示名であり識別子ではない）。
+    // Phase 1Aではこの値を読んで分岐する処理をまだ1つも作らないため（保存キーのスコープ、
+    // 復元スコープ、物件切替はそれぞれPhase 1B/1C/1Eの担当）、追加してもLBの挙動は
+    // 変わらない。値は supabase-integration.js の currentPropertyId（初期値は従来の固定
+    // PROPERTY_IDと同じUUID＝この組み込みデモ物件のID）から取り、二重管理を作らない。
+    // supabase-integration.js は同期スクリプトとしてこの行より前に読み込まれるが、
+    // CDNブロック等で未定義の場合に備えてnullへフォールバックする。
+    propertyId: (typeof window.getCurrentPropertyId === 'function') ? window.getCurrentPropertyId() : null,
     name: 'コスモ六甲ガーデンフォート',
     inspectionDate: formatDateJP(_today.getFullYear(), _today.getMonth() + 1, _today.getDate()),
     inspectionType: '総合点検',
@@ -4687,9 +4697,32 @@
     return null;
   }
 
-  // 読み込んだレコードをメモリ上のグローバル変数へ反映する(「前回の物件を続ける」選択時)。
-  // 個別の部屋の点検状況(state[room])はここでは触らない。既存のloadAll()(1秒ごとの
-  // ポーリング)が、反映後のFLOORSを対象にstorageGet(keyFor(room))で改めて復元する。
+  /* [2026-08-17新設 Phase 1B] 物件が未読込のときのPROPERTYの既定初期値。このファイル冒頭の
+     `var PROPERTY = {...}` と同じ項目構成にする(新しい項目は増やさない)。
+     propertyIdは、この時点で保存先スコープとして実際に使われている現在の値をそのまま
+     引き継ぐ(currentPropertyIdはこの経路では変わらない。推測で新しいUUIDを作らない。
+     新規物件のpropertyId採番はPhase 1Eの担当)。 */
+  function blankPropertyRecord() {
+    return {
+      propertyId: (PROPERTY && PROPERTY.propertyId !== undefined) ? PROPERTY.propertyId : null,
+      name: '', inspectionDate: '', inspectionType: '',
+      startTime: '09:00', endTime: '17:00', actualStartTime: '', actualEndTime: '',
+      siteSupervisor: '', scheduleDays: null,
+    };
+  }
+
+  /* 読み込んだレコードをメモリ上のグローバル変数へ反映する(「前回の物件を続ける」選択時)。
+     個別の部屋の点検状況(state[room])はここでは触らない。既存のloadAll()(1秒ごとの
+     ポーリング)が、反映後のFLOORSを対象にstorageGet(keyFor(room))で改めて復元する。
+
+     [2026-08-17改訂 Phase 1B] 「レコードに値があれば上書き、無ければ現在のメモリをそのまま
+     残す」という従来の片側だけの分岐をやめ、値が無い場合は必ず既定初期値へ戻す。従来は、
+     別物件(または起動直後の組み込みデモ)の値が残っている状態でこの関数が呼ばれ、レコード側に
+     その項目が無いと、前の物件のFLOORS/SENSOR_MASTER/消火器一覧等が残り続けていた
+     (物件をまたいだ混入の構造的な原因)。
+     ・PROPERTY.propertyId は落とさない。propertyIdが無い旧レコード(Phase 1A以前に保存された
+       もの)に対して、推測でUUIDを作ることもしない(migrationはPhase 1Dの担当)。
+     ・保存データは1件も削除しない(ここで行うのはメモリ上の初期化だけ)。 */
   function applyCurrentPropertyRecord(record) {
     if (!record) return;
     // [2026-08-13追加 新捺印表OCR→LB接続] 「前回の物件を続ける」でFLOORS等を復元する経路も、
@@ -4697,20 +4730,20 @@
     // 設計のため、復元しても上書きされない)。リロードのたびにデモ値が実物件の部屋番号へ
     // 偶然一致して表示される原因だったので、ここでも必ず無効化する。
     clearDemoStampDataForPropertyChange();
-    if (record.property && typeof record.property === 'object') PROPERTY = record.property;
-    if (Array.isArray(record.floors)) FLOORS = record.floors;
-    if (record.sensorMaster && typeof record.sensorMaster === 'object') SENSOR_MASTER = record.sensorMaster;
-    if (Array.isArray(record.extinguisherData)) EXTINGUISHER_DATA = record.extinguisherData;
+    PROPERTY = (record.property && typeof record.property === 'object') ? record.property : blankPropertyRecord();
+    FLOORS = Array.isArray(record.floors) ? record.floors : [];
+    SENSOR_MASTER = (record.sensorMaster && typeof record.sensorMaster === 'object') ? record.sensorMaster : {};
+    EXTINGUISHER_DATA = Array.isArray(record.extinguisherData) ? record.extinguisherData : [];
     // [2026-08-05修正、現場実機テストP1対応] 保存済みデータに過去の不具合(・リストA/・リストB
     // が設備名として混入)が既に含まれている場合、再読込のたびに毎回それがそのまま復元されて
     // しまわないよう、読み込み時にも同じ判定(isEquipmentListNoiseLabel)でサニタイズする
     // (要件「既存データについても、読込・再生成時に取り除く」への対応)。
-    if (Array.isArray(record.equipmentList)) EQUIPMENT_LIST = record.equipmentList.filter(function(name) { return !isEquipmentListNoiseLabel(name); });
-    if (Array.isArray(record.previousDefects)) PREVIOUS_DEFECTS = record.previousDefects;
-    if (Array.isArray(record.ladderRooms)) LADDER_ROOMS = record.ladderRooms;
-    if (Array.isArray(record.evacuationEquipmentRooms)) EVACUATION_EQUIPMENT_ROOMS = record.evacuationEquipmentRooms;
+    EQUIPMENT_LIST = Array.isArray(record.equipmentList) ? record.equipmentList.filter(function(name) { return !isEquipmentListNoiseLabel(name); }) : [];
+    PREVIOUS_DEFECTS = Array.isArray(record.previousDefects) ? record.previousDefects : [];
+    LADDER_ROOMS = Array.isArray(record.ladderRooms) ? record.ladderRooms : [];
+    EVACUATION_EQUIPMENT_ROOMS = Array.isArray(record.evacuationEquipmentRooms) ? record.evacuationEquipmentRooms : [];
     // [2026-08-05追加、現場実機テストP0-2対応]
-    if (record.roomSpaceTypeFlags && typeof record.roomSpaceTypeFlags === 'object') ROOM_SPACE_TYPE_FLAGS = record.roomSpaceTypeFlags;
+    ROOM_SPACE_TYPE_FLAGS = (record.roomSpaceTypeFlags && typeof record.roomSpaceTypeFlags === 'object') ? record.roomSpaceTypeFlags : {};
     TOTAL_ROOMS = 0;
     FLOORS.forEach(function(f) { TOTAL_ROOMS += f.rooms.length; });
     // 2026-08-04追加(実E2E再検証で判明した不具合修正): 起動ゲートの「前回の物件を続ける」
@@ -4768,6 +4801,128 @@
       try { storageDelete(scheduleOverrideKeyFor(room), true).catch(function() {}); } catch (err) {}
     });
     scheduleOverrides = {};
+  }
+
+  /* ============================================================
+     [2026-08-17新設 Phase 1B] 物件スコープの「初期状態」と、その一括復帰。
+
+     背景(Phase 1B仕様 2章): 現在のLBには「保存データが見つかったら上書きするが、見つから
+     なければ現在メモリ/DOMの値をそのまま残す」復元経路が複数ある。単一物件前提では見えに
+     くかったが、propertyIdによる物件切替を入れると
+       物件A → 物件B
+     でBに値が無い項目へAの値が残留する。Phase 1Bではこの構造だけを直す。
+
+     【絶対条件】ここでの「初期化」は現在のメモリ/DOMを初期状態へ戻すことであり、保存済み
+     データの削除ではない。storageDelete()・IndexedDB delete・Supabase delete・StampStoreの
+     clearPersisted()は絶対に呼ばない(保存データの全消去は、利用者が明示的に選んだ場合の
+     既存経路 resetInspectionDataForCurrentRoomSet() だけが行う)。
+
+     propertyViewBaseline は「保存データが1件も無いときに表示すべき値」を1箇所へ持つ。
+     起動直後は、このHTML/JSに直書きされている組み込みデモ物件の値(＝Phase 1B以前に
+     『保存が無ければそのまま残っていた』のと同じ値)を採用するため、物件を切り替えない限り
+     挙動は変わらない。resetAllInMemoryPropertyState() を通った後だけbaselineは空へ切り替わり、
+     以後「保存が無い＝空」になる(別物件・デモの値を業務データとして表示しない)。
+     ============================================================ */
+  var propertyViewBaseline = null; // 初回参照時に、直書きされている初期値から1度だけ取り込む
+
+  function blankPropertyViewBaseline() {
+    var boTableHtml = {};
+    BO_TABLE_SECTIONS.forEach(function(section) { boTableHtml[section] = ''; });
+    return { buildingNotesHtml: '', boTableHtml: boTableHtml, progressLog: [], uploadedDocuments: [] };
+  }
+
+  // 「保存が無いとき」に使う初期値。復元関数(loadBuildingNotes等)は、await の前に必ず
+  // これを1度呼んでから保存値を読むこと(保存値でDOMを書き換えた後に取り込むと、その物件の
+  // 値をbaselineとして固定してしまうため)。
+  function currentPropertyViewBaseline() {
+    if (propertyViewBaseline) return propertyViewBaseline;
+    var boTableHtml = {};
+    BO_TABLE_SECTIONS.forEach(function(section) {
+      var el = document.getElementById('boTable-' + section);
+      boTableHtml[section] = el ? el.innerHTML : '';
+    });
+    var notesEl = document.getElementById('boNotesDisplay');
+    propertyViewBaseline = {
+      buildingNotesHtml: notesEl ? notesEl.innerHTML : '',
+      boTableHtml: boTableHtml,
+      progressLog: progressLog.slice(),
+      uploadedDocuments: UPLOADED_DOCUMENTS.slice(),
+    };
+    return propertyViewBaseline;
+  }
+
+  // baselineのうち、DOMへ直接書かれている物件概要(特記事項・基本情報/移報関係/借用鍵)を反映する。
+  function applyPropertyViewBaselineToDom() {
+    var baseline = currentPropertyViewBaseline();
+    var notesEl = document.getElementById('boNotesDisplay');
+    if (notesEl) notesEl.innerHTML = baseline.buildingNotesHtml;
+    BO_TABLE_SECTIONS.forEach(function(section) {
+      var el = document.getElementById('boTable-' + section);
+      if (el) el.innerHTML = baseline.boTableHtml[section] || '';
+    });
+  }
+
+  /* 物件切替の前段として使う、「保存データは1件も削除せず、現在のメモリと表示だけを
+     初期状態へ戻す」単一関数。Phase 1Bでは基盤として追加するだけで、まだどこからも
+     呼ばない(物件切替UIはPhase 1E)。
+     PROPERTY.propertyId は落とさない。currentPropertyId(supabase-integration.js)は
+     この関数では変更しないため、現在の有効なpropertyIdをそのまま引き継ぐ
+     (推測で新しいUUIDを作らない。新規物件のpropertyId採番はPhase 1E)。 */
+  function resetAllInMemoryPropertyState() {
+    propertyViewBaseline = blankPropertyViewBaseline();
+
+    // ---- 物件そのもの(点検前データ) ----
+    PROPERTY = blankPropertyRecord();
+    FLOORS = [];
+    SENSOR_MASTER = {};
+    TOTAL_ROOMS = 0;
+    EXTINGUISHER_DATA = [];
+    EQUIPMENT_LIST = [];
+    PREVIOUS_DEFECTS = [];
+    LADDER_ROOMS = [];
+    EVACUATION_EQUIPMENT_ROOMS = [];
+    ROOM_SPACE_TYPE_FLAGS = {};
+
+    // ---- 点検中データ ----
+    state = {};
+    lastRawByRoom = {};
+    scheduleOverrides = {};
+    lastRawScheduleOverrideByRoom = {};
+    scheduleLabels = {};
+    scheduleDayColors = {};
+    haBadges = {};
+    sensorCounts = {};
+    equipmentState = {};
+    extinguisherState = {};
+
+    // ---- 物件付随データ ----
+    progressLog = [];
+    editingProgressLogId = null;
+    UPLOADED_DOCUMENTS = [];
+    siteSupervisorLocked = false;
+
+    // ---- 表示状態 ----
+    currentHomeMode = 'normal';
+    activeFilter = null;
+
+    // 予定情報はStampStoreが正本。メモリだけを空にする既存関数を使う(保存データは消さない)。
+    clearDemoStampDataForPropertyChange();
+
+    // ---- DOM ----
+    applyPropertyViewBaselineToDom();
+    var buildingEl = document.querySelector('.building');
+    if (buildingEl) buildingEl.textContent = '';
+    var progressTotalEl = document.getElementById('progressTotalLabel');
+    if (progressTotalEl) progressTotalEl.textContent = ' / ' + TOTAL_ROOMS + '件';
+    var roomListTitleEl = document.getElementById('roomListTitle');
+    if (roomListTitleEl) roomListTitleEl.textContent = '部屋一覧（全' + TOTAL_ROOMS + '件）';
+    initScheduleLabels();
+    renderFilterChips();
+    renderFloors();
+    renderProgressLogTable();
+    renderSiteSupervisorField();
+    renderEquipmentList();
+    renderPropertyInfo();
   }
 
   /* [2026-08-13追加 新捺印表OCR→LB接続] 新捺印表OCRの読み取りが「要確認」だった部屋に付ける
@@ -7024,16 +7179,25 @@
       storageSet(BUILDING_NOTES_KEY, text, true).catch(function() {});
     } catch (err) {}
   }
+  // [2026-08-17改訂 Phase 1B] 保存値が無い場合に「今表示されている内容をそのまま残す」のを
+  // やめ、必ず初期状態(propertyViewBaseline)へ戻す。従来は、物件を切り替えても新しい物件に
+  // 特記事項の保存が無ければ、前の物件(または直書きのデモ物件)の特記事項が業務データとして
+  // 表示され続けていた。baselineの取り込みはawaitより前に行う(保存値でDOMを書き換えた後だと、
+  // その物件の値を初期値として固定してしまうため)。
   async function loadBuildingNotes() {
+    var baseline = currentPropertyViewBaseline();
+    var display = document.getElementById('boNotesDisplay');
+    var savedText = null;
     try {
       var result = await storageGet(BUILDING_NOTES_KEY, true);
-      if (result && typeof result.value === 'string') {
-        var display = document.getElementById('boNotesDisplay');
-        display.innerHTML = result.value.split('\n').map(function(line) {
+      if (result && typeof result.value === 'string') savedText = result.value;
+    } catch (err) { /* 未編集（この物件には保存が無い） */ }
+    if (!display) return;
+    display.innerHTML = (savedText === null)
+      ? baseline.buildingNotesHtml
+      : savedText.split('\n').map(function(line) {
           return '<div>' + (line ? escapeHtml(line) : '&nbsp;') + '</div>';
         }).join('');
-      }
-    } catch (err) { /* 未編集（初期の色分け表示のまま） */ }
   }
   function escapeHtml(str) {
     return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
@@ -7100,15 +7264,20 @@
       storageSet(BO_TABLE_KEY_PREFIX + section, text, true).catch(function() {});
     } catch (err) {}
   }
+  // [2026-08-17改訂 Phase 1B] loadBuildingNotes()と同じ理由で、保存値が無いセクションは
+  // 前の物件のテキストを残さず初期状態へ戻す(basic/transfer/keysの3セクションとも)。
   async function loadBoTables() {
+    var baseline = currentPropertyViewBaseline();
     for (var i = 0; i < BO_TABLE_SECTIONS.length; i++) {
       var section = BO_TABLE_SECTIONS[i];
+      var savedText = null;
       try {
         var result = await storageGet(BO_TABLE_KEY_PREFIX + section, true);
-        if (result && typeof result.value === 'string') {
-          document.getElementById('boTable-' + section).innerHTML = boTextToTableHtml(result.value);
-        }
-      } catch (err) { /* 未編集（初期表示のまま） */ }
+        if (result && typeof result.value === 'string') savedText = result.value;
+      } catch (err) { /* 未編集（この物件には保存が無い） */ }
+      var el = document.getElementById('boTable-' + section);
+      if (!el) continue;
+      el.innerHTML = (savedText === null) ? (baseline.boTableHtml[section] || '') : boTextToTableHtml(savedText);
     }
   }
   Array.prototype.forEach.call(document.querySelectorAll('.notes-edit-btn[data-section]'), function(btn) {
@@ -7282,18 +7451,21 @@
     closeProgressLogEntry();
   });
 
+  // [2026-08-17改訂 Phase 1B] 保存値が無い場合に前の物件の経過記録を残さず、初期状態
+  // (propertyViewBaseline.progressLog。物件切替後は空配列)へ戻す。
   async function loadProgressLog() {
+    var baseline = currentPropertyViewBaseline();
     renderProgressLogTable();
+    var parsed = null;
     try {
       var result = await storageGet(PROGRESS_LOG_KEY, true);
       if (result && typeof result.value === 'string') {
-        var parsed = JSON.parse(result.value);
-        if (Array.isArray(parsed)) {
-          progressLog = parsed;
-          renderProgressLogTable();
-        }
+        var candidate = JSON.parse(result.value);
+        if (Array.isArray(candidate)) parsed = candidate;
       }
-    } catch (err) { /* 未編集(初期表示のまま) */ }
+    } catch (err) { /* この物件には保存が無い、または壊れている */ }
+    progressLog = (parsed === null) ? baseline.progressLog.slice() : parsed;
+    renderProgressLogTable();
   }
 
   document.getElementById('progressLogAddBtn').addEventListener('click', function() { openProgressLogEntry(null); });
@@ -7805,6 +7977,28 @@
     var allRooms = [];
     FLOORS.forEach(function(f) { allRooms = allRooms.concat(f.rooms); });
 
+    /* [2026-08-17追加 Phase 1B] 現在の物件(FLOORS)に存在しない部屋の点検状態・予定上書きを
+       メモリから落とす。物件を切り替えた直後は、前の物件の部屋がstate/scheduleOverridesに
+       残ったままで、RF書き出し(buildReportFlowPayload)や集計がそれを拾ってしまう。
+       【重要】メモリから消すだけで、保存データ(storageDelete)には一切触らない。切り替えて
+       戻ってくれば、その部屋の保存済み点検結果はそのまま読み直せる。
+       共用部(COMMON_AREA_KEY)はFLOORSに含まれない正規の記録先なので対象外。
+       なお「FLOORSに在るが保存が無い部屋」をここで消すことはできない。storageGet()は
+       『データが無い』と『読み取りに失敗した』を区別できず(window.storage.getは未存在キーで
+       throwし、storageGet()はIndexedDBキャッシュへフォールバックする)、消してしまうと
+       オフライン起動時に全部屋の点検状態が画面から消える。保存が無い部屋の初期state
+       (＝未点検)は、物件切替時のresetAllInMemoryPropertyState()が担保する。 */
+    var roomInCurrentProperty = { };
+    allRooms.forEach(function(room) { roomInCurrentProperty[room] = true; });
+    roomInCurrentProperty[COMMON_AREA_KEY] = true;
+    var prunedAny = false;
+    Object.keys(state).forEach(function(room) {
+      if (!roomInCurrentProperty[room]) { delete state[room]; delete lastRawByRoom[room]; prunedAny = true; }
+    });
+    Object.keys(scheduleOverrides).forEach(function(room) {
+      if (!roomInCurrentProperty[room]) { delete scheduleOverrides[room]; delete lastRawScheduleOverrideByRoom[room]; prunedAny = true; }
+    });
+
     var results = await Promise.all(allRooms.map(function(room) {
       return storageGet(keyFor(room), true).catch(function() { return null; });
     }));
@@ -7812,7 +8006,7 @@
       return storageGet(scheduleOverrideKeyFor(room), true).catch(function() { return null; });
     }));
 
-    var changed = false;
+    var changed = prunedAny;
     for (var i = 0; i < allRooms.length; i++) {
       var room = allRooms[i];
       var result = results[i];
@@ -8078,16 +8272,21 @@
     } catch (err) { /* 共有保存の失敗は静かに無視 */ }
   }
 
+  /* [2026-08-17改訂 Phase 1B] 保存値が無い場合も必ず明示的に初期化する。
+     現場責任者の氏名そのものはPROPERTY.siteSupervisorが持ち、これは物件レコード
+     (CURRENT_PROPERTY_KEY)側で物件ごとに復元・初期化される。したがってここで氏名を
+     baselineで上書きすると、正しく復元済みの値を消してしまうため上書きしない。
+     一方 siteSupervisorLocked はこのキーにしか無い物件付随データで、従来は保存が無いと
+     前の物件の確定状態が残っていたため、ここで未確定へ戻す。 */
   async function loadSiteSupervisor() {
+    var data = null;
     try {
       var result = await storageGet(SITE_SUPERVISOR_KEY, true);
-      if (result && result.value) {
-        var data = JSON.parse(result.value);
-        if (data.name) PROPERTY.siteSupervisor = data.name;
-        siteSupervisorLocked = !!data.locked;
-        renderSiteSupervisorField();
-      }
-    } catch (err) { /* 未設定 */ }
+      if (result && result.value) data = JSON.parse(result.value);
+    } catch (err) { /* この物件には保存が無い */ }
+    if (data && data.name) PROPERTY.siteSupervisor = data.name;
+    siteSupervisorLocked = !!(data && data.locked);
+    renderSiteSupervisorField();
   }
 
   document.getElementById('infoSiteSupervisor').addEventListener('change', function(e) {
@@ -8270,20 +8469,25 @@
     } catch (err) {}
   }
 
+  /* [2026-08-17改訂 Phase 1B] 保存値が無いときの状態を明示する。冒頭の
+     seedScheduleDaysIfNeeded() が「保存が無いときの正しい初期値」(PROPERTY.inspectionDateから
+     1日分)を必ず作る。日程の元になるPROPERTY自体は物件レコード側で物件ごとに復元・初期化
+     されるため、前の物件の日付・開始/終了時刻はここへ残らない。 */
   async function loadScheduleDays() {
     seedScheduleDaysIfNeeded();
     renderScheduleDays();
+    var parsed = null;
     try {
       var result = await storageGet(SCHEDULE_DAYS_KEY, true);
       if (result && typeof result.value === 'string') {
-        var parsed = JSON.parse(result.value);
-        if (Array.isArray(parsed) && parsed.length) {
-          PROPERTY.scheduleDays = parsed;
-          syncLegacyPropertyTimeFields();
-          renderScheduleDays();
-        }
+        var candidate = JSON.parse(result.value);
+        if (Array.isArray(candidate) && candidate.length) parsed = candidate;
       }
-    } catch (err) { /* 未保存(初期表示のまま) */ }
+    } catch (err) { /* この物件には保存が無い(上の初期値のまま) */ }
+    if (parsed === null) return;
+    PROPERTY.scheduleDays = parsed;
+    syncLegacyPropertyTimeFields();
+    renderScheduleDays();
   }
 
   function renderScheduleDays() {
@@ -8552,6 +8756,12 @@
     resetInspectionDataForCurrentRoomSet();
     var prevSiteSupervisor = PROPERTY.siteSupervisor;
     PROPERTY = {
+      // [2026-08-17追加 Phase 1B] PROPERTYをオブジェクトごと差し替えるこの経路は、
+      // Phase 1Aで追加したpropertyIdを黙って落としていた(Phase 1A監査で判明)。
+      // Phase 1Bでは物件切替もpropertyId採番も行わない(採番はPhase 1E)ため、この時点で
+      // 保存先スコープとして実際に使われている currentPropertyId をそのまま入れる。
+      // 推測で新しいUUIDを作らない。
+      propertyId: (typeof window !== 'undefined' && typeof window.getCurrentPropertyId === 'function') ? window.getCurrentPropertyId() : null,
       name: fields.name,
       code: fields.code || '',
       managementCompany: fields.managementCompany || '',
@@ -8715,19 +8925,24 @@
   function persistEquipmentList() {
     try { storageSet(EQUIPMENT_LIST_KEY, JSON.stringify(EQUIPMENT_LIST), true).catch(function() {}); } catch (err) {}
   }
+  /* [2026-08-17改訂 Phase 1B] 従来は保存値が空配列のとき(parsed.lengthが0)それを無視して
+     いたため、「この物件の設備一覧は空」と保存されていても前の物件の設備一覧が残っていた。
+     空配列も保存値として扱う。保存自体が無い場合の初期値はEQUIPMENT_LIST(物件レコード側で
+     物件ごとに復元・初期化される)で、そちらにも前の物件の値は残らない。 */
   async function loadEquipmentList() {
+    var parsed = null;
     try {
       var result = await storageGet(EQUIPMENT_LIST_KEY, true);
       if (result && typeof result.value === 'string') {
-        var parsed = JSON.parse(result.value);
-        if (Array.isArray(parsed) && parsed.length) {
-          // [2026-08-05修正、現場実機テストP1対応] 上のapplyCurrentPropertyRecord()と同じ理由
-          // (過去の不具合混入データの再読込対策)で、こちらの独立した永続化経路でもサニタイズする。
-          EQUIPMENT_LIST = parsed.filter(function(name) { return !isEquipmentListNoiseLabel(name); });
-          renderEquipmentList();
-        }
+        var candidate = JSON.parse(result.value);
+        if (Array.isArray(candidate)) parsed = candidate;
       }
-    } catch (err) { /* 未編集(初期値のまま) */ }
+    } catch (err) { /* この物件には保存が無い */ }
+    if (parsed === null) return;
+    // [2026-08-05修正、現場実機テストP1対応] 上のapplyCurrentPropertyRecord()と同じ理由
+    // (過去の不具合混入データの再読込対策)で、こちらの独立した永続化経路でもサニタイズする。
+    EQUIPMENT_LIST = parsed.filter(function(name) { return !isEquipmentListNoiseLabel(name); });
+    renderEquipmentList();
   }
   // 2026-07-19削除: 設備情報の設定パネル(renderEquipmentSettingsList/openEquipmentSettingsPanel/
   // closeEquipmentSettingsPanel等)とそのボタン・ダイアログのイベント配線は撤去した
@@ -8740,16 +8955,20 @@
   function persistUploadedDocuments() {
     try { storageSet(UPLOADED_DOCUMENTS_KEY, JSON.stringify(UPLOADED_DOCUMENTS), true).catch(function() {}); } catch (err) {}
   }
+  // [2026-08-17改訂 Phase 1B] 保存値が無い場合は前の物件のアップロード資料一覧を残さず、
+  // 初期状態(propertyViewBaseline.uploadedDocuments＝空配列)へ戻す。
+  // 【重要】ここで消すのは一覧のメモリだけで、保存済みのファイル・レコードは削除しない。
   async function loadUploadedDocuments() {
+    var baseline = currentPropertyViewBaseline();
+    var parsed = null;
     try {
       var result = await storageGet(UPLOADED_DOCUMENTS_KEY, true);
       if (result && typeof result.value === 'string') {
-        var parsed = JSON.parse(result.value);
-        if (Array.isArray(parsed)) {
-          UPLOADED_DOCUMENTS = parsed;
-        }
+        var candidate = JSON.parse(result.value);
+        if (Array.isArray(candidate)) parsed = candidate;
       }
-    } catch (err) { /* 未保存(空配列のまま) */ }
+    } catch (err) { /* この物件には保存が無い */ }
+    UPLOADED_DOCUMENTS = (parsed === null) ? baseline.uploadedDocuments.slice() : parsed;
   }
 
   // 設備点検を1件ずつタップするのが手間な場合に、一括で点検済みにするボタン。
@@ -9501,7 +9720,9 @@
     // nameを黙って書き換えると予定情報(StampStore)の物件スコープまで変わってしまうため、
     // 既存の「未設定のときだけ補完する」既存パターン(applyPropertyMasterIntakeToLb)に揃える。
     if (reportHasRoomRoster) {
-      PROPERTY = { name: buildingName, inspectionDate: inspectionDate, inspectionType: inspectionType, startTime: '09:00', endTime: '17:00', actualStartTime: '', actualEndTime: '', siteSupervisor: nextSiteSupervisor, scheduleDays: null };
+      // [2026-08-17追加 Phase 1B] createNewProperty()と同じ理由で、PROPERTYの差し替えで
+      // propertyIdを落とさない(業務ロジック自体は変更していない。propertyIdの採番はPhase 1E)。
+      PROPERTY = { propertyId: (typeof window !== 'undefined' && typeof window.getCurrentPropertyId === 'function') ? window.getCurrentPropertyId() : null, name: buildingName, inspectionDate: inspectionDate, inspectionType: inspectionType, startTime: '09:00', endTime: '17:00', actualStartTime: '', actualEndTime: '', siteSupervisor: nextSiteSupervisor, scheduleDays: null };
       seedScheduleDaysIfNeeded();
       persistScheduleDays(); // 新しい物件のため、以前の物件の日程一覧の保存値を上書き(1件だけに戻す)
     } else {
