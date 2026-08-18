@@ -317,25 +317,25 @@ const INITIAL_PROPERTY_ID = 'b6e18eed-f2f3-4674-812d-322732908616'; // コスモ
     // 同じく「先にselect、あれば更新・なければ新規作成」の手動upsertにしている。
     var q = kvScopeQuery(sb.from('kv_store').select('id').eq('key', key).eq('shared', !!shared), propertyId, shared);
     var { data: existing, error: selError } = await q.maybeSingle();
-    if (selError) return null;
+    if (selError) throw selError;
     if (existing) {
       var { error: updError } = await sb.from('kv_store')
         .update({ value: String(value), updated_at: new Date().toISOString() })
         .eq('id', existing.id);
-      if (updError) return null;
+      if (updError) throw updError;
     } else {
       var { error: insError } = await sb.from('kv_store').insert({
         property_id: propertyId, key: key, value: String(value), shared: !!shared,
         owner_id: shared ? null : currentUser.id, updated_at: new Date().toISOString(),
       });
-      if (insError) return null;
+      if (insError) throw insError;
     }
     return { key: key, value: value, shared: !!shared };
   }
   async function kvDeleteForProperty(propertyId, key, shared) {
     var q = kvScopeQuery(sb.from('kv_store').delete().eq('key', key).eq('shared', !!shared), propertyId, shared);
     var { error } = await q;
-    if (error) return null;
+    if (error) throw error;
     return { key: key, deleted: true, shared: !!shared };
   }
   async function kvListForProperty(propertyId, prefix, shared) {
@@ -368,21 +368,26 @@ const INITIAL_PROPERTY_ID = 'b6e18eed-f2f3-4674-812d-322732908616'; // コスモ
         // 手動upsertに変更しています。
         var q = sb.from('kv_store').select('id').eq('property_id', currentPropertyId).eq('key', key).eq('shared', !!shared);
         q = shared ? q.is('owner_id', null) : q.eq('owner_id', currentUser.id);
+        /* [2026-08-18修正] 以前はここでエラーを return null にしていた。呼び出し元の
+           storageSet() は「例外が出なければ保存できた」と判断するため、保存に失敗しても
+           送信キュー(outbox)へ積まれず、現場で入力した点検記録がエラー表示も無いまま
+           消えていた。get() と同じく、失敗は必ず例外で呼び出し元へ伝える
+           （storageSet() 側が受け取って送信キューへ積み、自動再送する）。 */
         var { data: existing, error: selError } = await q.maybeSingle();
-        if (selError) return null;
+        if (selError) throw selError;
 
         if (existing) {
           var { error: updError } = await sb.from('kv_store')
             .update({ value: String(value), updated_at: new Date().toISOString() })
             .eq('id', existing.id);
-          if (updError) return null;
+          if (updError) throw updError;
         } else {
           var row = {
             property_id: currentPropertyId, key: key, value: String(value), shared: !!shared,
             owner_id: shared ? null : currentUser.id, updated_at: new Date().toISOString(),
           };
           var { error: insError } = await sb.from('kv_store').insert(row);
-          if (insError) return null;
+          if (insError) throw insError;
         }
         return { key: key, value: value, shared: !!shared };
       },
@@ -391,7 +396,8 @@ const INITIAL_PROPERTY_ID = 'b6e18eed-f2f3-4674-812d-322732908616'; // コスモ
         var q = sb.from('kv_store').delete().eq('property_id', currentPropertyId).eq('key', key).eq('shared', !!shared);
         q = shared ? q.is('owner_id', null) : q.eq('owner_id', currentUser.id);
         var { error } = await q;
-        if (error) return null;
+        // set() と同じ理由で、削除の失敗も必ず例外で伝える(黙って成功扱いにしない)。
+        if (error) throw error;
         return { key: key, deleted: true, shared: !!shared };
       },
       async list(prefix, shared, propertyId) {

@@ -4389,11 +4389,16 @@
       }
       var outboxOpts = { alreadyScoped: true, propertyId: item.propertyId || null };
       try {
-        if (item.deleted) {
-          await storageDelete(item.rawKey, item.shared, outboxOpts);
-        } else {
-          await storageSet(item.rawKey, item.value, item.shared, outboxOpts);
-        }
+        var result = item.deleted
+          ? await storageDelete(item.rawKey, item.shared, outboxOpts)
+          : await storageSet(item.rawKey, item.value, item.shared, outboxOpts);
+        /* [2026-08-18修正] リモート保存を確認できた時だけ送信キューから削除する。
+           storageSet/storageDelete はリモート失敗を例外にせず、同じキーで送信キューへ
+           積み直したうえで正常終了する。以前はここでその正常終了を「送信できた」と
+           誤認し、直前に積み直された未送信データごと lcDelete していたため、
+           送れていない点検記録が「同期完了」表示とともに黙って消えていた。
+           FireFlowでは通信失敗そのものより、失敗したデータを成功と思って捨てる方が重大。 */
+        if (!result || result.remote !== true) continue; // 送信キューに残したまま次回へ持ち越す
         await lcDelete('outbox', item.key);
         sentCount++;
       } catch (err) {
@@ -4419,14 +4424,25 @@
   // 通信の成否に関わらずローカルへ即時保存し、失敗した書き込みだけを自動的に再送する。
   // [2026-08-18追加 Phase 1C] 第4引数optsは送信キュー(outbox)の再送専用の内部引数。
   // 通常の呼び出し(3引数まで)ではPhase 1B以前と同じシグネチャのまま使える。
+  /* [2026-08-18追加] 返り値は「リモートまで保存できたか」を呼び出し元へ伝える契約。
+       { remote: true,  queued: false } … リモート保存を確認できた(REMOTE_CONFIRMED_SUCCESS)
+       { remote: false, queued: true  } … ローカルには保存済み。リモートは失敗し送信キューへ積んだ
+     リモート失敗でも例外は投げない(通常の呼び出し側の挙動を変えないため)ので、
+     「保存できたか」を判断したい呼び出し元は必ずこの返り値を見ること。返り値を見ない
+     従来の呼び出し(全ての現場入力経路)の挙動はPhase 1Cまでと同一。 */
   async function storageSet(key, value, shared, opts) {
     var scope = applyPropertyScope(key, opts);
     var cacheKey = lcCacheKey(scope.key, shared);
+    var remoteOk = false;
     await lcPut('cache', { key: cacheKey, value: value, updatedAt: Date.now() });
     try {
       if (!window.storage) throw new Error('window.storage is not ready yet');
-      await window.storage.set(scope.key, value, shared, scope.propertyId);
+      // window.storage.set は保存できなかったとき null を返し得る。nullを成功と誤認すると
+      // 「送れていないのに送れたことにする」ため、ここで明示的に失敗として扱う。
+      var result = await window.storage.set(scope.key, value, shared, scope.propertyId);
+      if (!result) throw new Error('REMOTE_SET_FAILED: ' + scope.key);
       await lcDelete('outbox', cacheKey);
+      remoteOk = true;
     } catch (err) {
       // 送信先の物件は「積んだ時点のpropertyId」で確定させる(再送時のcurrentPropertyIdでは決めない)。
       await lcPut('outbox', { key: cacheKey, rawKey: scope.key, value: value, shared: !!shared, deleted: false,
@@ -4434,6 +4450,7 @@
       scheduleOutboxRetry();
     }
     updateSyncBadge();
+    return { key: key, remote: remoteOk, queued: !remoteOk };
   }
   async function storageGet(key, shared, opts) {
     var scope = applyPropertyScope(key, opts);
@@ -4450,20 +4467,25 @@
       throw err;
     }
   }
+  // 返り値の契約は storageSet() と同じ({ remote, queued })。
   async function storageDelete(key, shared, opts) {
     var scope = applyPropertyScope(key, opts);
     var cacheKey = lcCacheKey(scope.key, shared);
+    var remoteOk = false;
     await lcDelete('cache', cacheKey);
     try {
       if (!window.storage) throw new Error('window.storage is not ready yet');
-      await window.storage.delete(scope.key, shared, scope.propertyId);
+      var result = await window.storage.delete(scope.key, shared, scope.propertyId);
+      if (!result) throw new Error('REMOTE_DELETE_FAILED: ' + scope.key);
       await lcDelete('outbox', cacheKey);
+      remoteOk = true;
     } catch (err) {
       await lcPut('outbox', { key: cacheKey, rawKey: scope.key, value: null, shared: !!shared, deleted: true,
         propertyId: scope.propertyId, alreadyScoped: true, updatedAt: Date.now() });
       scheduleOutboxRetry();
     }
     updateSyncBadge();
+    return { key: key, remote: remoteOk, queued: !remoteOk };
   }
   async function storageList(prefix, shared, opts) {
     // list()はプレゼンス表示やスキャン結果の一覧取得など補助的な用途のみで使われており、
