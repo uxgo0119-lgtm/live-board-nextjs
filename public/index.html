@@ -4374,20 +4374,40 @@
     isSyncingNow = true;
     updateSyncBadge();
     var sentCount = 0;
-    var unknownPropertyCount = 0;
+    var heldCount = 0;
     for (var i = 0; i < items.length; i++) {
       var item = items[i];
-      /* [2026-08-18追加 Phase 1C] 送信先の物件は「積んだ時点のpropertyId」で決める。
-         再送時のcurrentPropertyIdで決めると、A物件でオフライン保存した内容が、
-         その後Bへ切り替わっていた場合にB物件へ入ってしまう。
-         propertyIdを持たないPhase 1C以前の旧itemは、どの物件のものか推測できない。
-         推測で割り当てず、UNKNOWNとしてキューに残す(削除もしない)。取り扱いは
-         Phase 1Dのmigrationへ回す。 */
-      if (PROPERTY_SCOPE_ENABLED && !item.alreadyScoped && isPropertyScopedKey(item.rawKey)) {
-        unknownPropertyCount++;
+      /* [2026-08-18修正 Phase 1E-0] 送信してよいのは「item自身が送信先propertyIdを
+         確定保持している」ものだけ。ここでcurrentPropertyIdへフォールバックしない。
+
+         旧判定: PROPERTY_SCOPE_ENABLED && !item.alreadyScoped && isPropertyScopedKey(item.rawKey)
+         このANDは3条件のどれも「propertyIdを持っているか」を見ておらず、次の3つの穴から
+         propertyId不明のitemが素通りしていた。
+           ・PROPERTY_SCOPE_ENABLEDは既定false。実端末はflag OFFで動いているため、
+             そもそも判定全体が成立せず、全itemが素通りしていた。
+           ・storageSet/storageDeleteが積むitemは常に alreadyScoped:true のため、
+             propertyIdがnullでも !item.alreadyScoped が false で素通りしていた。
+           ・stamp系('stamp:<物件>:<部屋>' / 'fireflow-stamp:<部屋>')はスコープ許可リストに
+             無く isPropertyScopedKey() が false のため素通りしていた。
+         素通りしたitemは propertyId=null のまま window.storage.set/delete() へ渡り、
+         supabase-integration.js 側の `if (propertyId && propertyId !== currentPropertyId)`
+         が false になって既定経路(＝currentPropertyIdへ書く)に入る。結果として
+         「どの物件のものか分からない旧データが、今たまたま開いている物件へ入る」。
+
+         判定はitem自身のpropertyIdだけで行う(feature flagにもキー名にも依存させない)。
+         分からないものは送らない・消さない・書き換えない。人間による物件割当は
+         Phase 1E-Bの担当で、ここでは保持するだけ。 */
+      var itemPropertyId = item.propertyId;
+      if (itemPropertyId === null || itemPropertyId === undefined || itemPropertyId === '') {
+        heldCount++;   // HOLD_NEEDS_ASSIGNMENT: 物件不明。推測で割り当てない
         continue;
       }
-      var outboxOpts = { alreadyScoped: true, propertyId: item.propertyId || null };
+      if (!isValidScopePropertyId(itemPropertyId)) {
+        heldCount++;   // HOLD_INVALID_PROPERTY: propertyIdが壊れている。推測で直さない
+        continue;
+      }
+      // SAFE_TO_SEND: 送信先は item.propertyId のみ。currentPropertyIdは一切見ない。
+      var outboxOpts = { alreadyScoped: true, propertyId: itemPropertyId };
       try {
         var result = item.deleted
           ? await storageDelete(item.rawKey, item.shared, outboxOpts)
@@ -4405,11 +4425,11 @@
         // このアイテムはまだ送れない。次回のリトライへ持ち越す(他のアイテムの送信は継続する)。
       }
     }
-    if (unknownPropertyCount > 0 && !warnedUnknownPropertyOutbox) {
+    if (heldCount > 0 && !warnedUnknownPropertyOutbox) {
       warnedUnknownPropertyOutbox = true;
       try {
-        console.warn('[Phase 1C] propertyIdを持たない送信待ちデータが ' + unknownPropertyCount
-          + ' 件あります。どの物件のものか推測できないため送信せずに保持します(削除もしません)。');
+        console.warn('[Phase 1E-0] 送信先の物件が確定していない送信待ちデータが ' + heldCount
+          + ' 件あります。どの物件のものか推測できないため送信せずに保持します(削除も書き換えもしません)。');
       } catch (err) {}
     }
     isSyncingNow = false;
@@ -4444,9 +4464,24 @@
       await lcDelete('outbox', cacheKey);
       remoteOk = true;
     } catch (err) {
-      // 送信先の物件は「積んだ時点のpropertyId」で確定させる(再送時のcurrentPropertyIdでは決めない)。
+      /* 送信先の物件は「積んだ時点のpropertyId」で確定させる(再送時のcurrentPropertyIdでは決めない)。
+         [2026-08-18追加 Phase 1E-0] scope.propertyId は feature flag OFF のときや、スコープ
+         対象外キー(stamp系など)のとき null になる。しかしその場合でも、この書き込みが実際に
+         向かった先は「今まさに操作している物件」= currentPropertyId として確定している。
+         それをここで控えておく。控えないと、Phase 1E-0のflush判定(送信先が確定していない
+         itemは送らない)によって、オフライン入力が永久に送信されなくなる。
+
+         これはflush時のfallbackではない。「書き込みが起きた瞬間に、その書き込みが実際に
+         向かった物件」を記録しているだけで、後からcurrentPropertyIdが変わっても影響されない。
+         再送(alreadyScoped)経路では絶対に埋め直さない。埋めるとそれこそが
+         「flush時のcurrentPropertyIdフォールバック」になり、Phase 1E-0の禁止事項に当たる。 */
+      var queuedPropertyId = scope.propertyId;
+      if (!isValidScopePropertyId(queuedPropertyId) && !(opts && opts.alreadyScoped)) {
+        var writeTimePropertyId = currentScopePropertyId();
+        queuedPropertyId = isValidScopePropertyId(writeTimePropertyId) ? writeTimePropertyId : null;
+      }
       await lcPut('outbox', { key: cacheKey, rawKey: scope.key, value: value, shared: !!shared, deleted: false,
-        propertyId: scope.propertyId, alreadyScoped: true, updatedAt: Date.now() });
+        propertyId: queuedPropertyId, alreadyScoped: true, updatedAt: Date.now() });
       scheduleOutboxRetry();
     }
     updateSyncBadge();
@@ -4480,8 +4515,14 @@
       await lcDelete('outbox', cacheKey);
       remoteOk = true;
     } catch (err) {
+      // [2026-08-18追加 Phase 1E-0] storageSet() と同じ理由・同じ規則で送信先物件を控える。
+      var queuedPropertyId = scope.propertyId;
+      if (!isValidScopePropertyId(queuedPropertyId) && !(opts && opts.alreadyScoped)) {
+        var writeTimePropertyId = currentScopePropertyId();
+        queuedPropertyId = isValidScopePropertyId(writeTimePropertyId) ? writeTimePropertyId : null;
+      }
       await lcPut('outbox', { key: cacheKey, rawKey: scope.key, value: null, shared: !!shared, deleted: true,
-        propertyId: scope.propertyId, alreadyScoped: true, updatedAt: Date.now() });
+        propertyId: queuedPropertyId, alreadyScoped: true, updatedAt: Date.now() });
       scheduleOutboxRetry();
     }
     updateSyncBadge();

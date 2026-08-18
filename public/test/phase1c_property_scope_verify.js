@@ -463,19 +463,43 @@ function runF() {
     check('flag OFF: propertyIdが無くても従来どおり保存できる(拒否ロジックが働かない)',
       envNoPid.remoteRows().length === 1, envNoPid.remoteRows().length);
 
-    // 旧outboxも従来どおり送信される
+    /* [2026-08-18更新 Phase 1E-0] ★Phase 1Cの不変条件を1件だけ意図的に破棄している★
+
+       ここは元々「flag OFF なら、propertyIdを持たない旧outboxも従来(Phase 1B)どおり
+       送信され、キューから消える」ことを確認していた。しかしその挙動こそが、
+       Phase 1E設計監査でP0として確定した不具合そのものだった。
+
+       propertyIdを持たないitemは window.storage.set() へ propertyId=null で渡り、
+       supabase-integration.js の `if (propertyId && propertyId !== currentPropertyId)`
+       が false になって既定経路(＝currentPropertyIdへ書く)に落ちる。つまり
+       「どの物件のものか分からない旧データが、今たまたま開いている物件へ入る」。
+       実端末にはこの形の旧outboxが132件残っており、実端末は flag OFF で動いている。
+       したがって flag OFF のままでも送ってはいけない。
+
+       Phase 1E-0 で送信条件を「item自身が有効なpropertyIdを保持していること」へ変更したため、
+       この1件については flag OFF ＝ Phase 1B完全同一 が成立しなくなる。
+       破棄したのはこの1件だけで、他の flag OFF 挙動(保存キー・保存先property_id・復元・
+       storageList)はPhase 1B時点と同一のまま(下の各checkで担保している)。 */
     var envOut = makeEnv({ scopeEnabled: false, currentPropertyId: PID_A });
     envOut.idb.outbox['shared:fireflow-binder:101'] = {
       key: 'shared:fireflow-binder:101', rawKey: 'fireflow-binder:101',
       value: 'legacy', shared: true, deleted: false, updatedAt: 1,
     };
     await envOut.ctx.flushOutbox();
-    check('flag OFF: 旧outboxは従来どおり送信され、キューから消える',
-      envOut.remoteRows().length === 1 && envOut.remoteRows()[0].key === 'fireflow-binder:101'
-      && envOut.outboxItems().length === 0, envOut.remoteRows());
+    check('flag OFF: propertyId無しの旧outboxは送信されない(Phase 1E-0で変更)',
+      envOut.remoteRows().length === 0, envOut.remoteRows());
+    check('flag OFF: propertyId無しの旧outboxは削除もされずキューに残る(Phase 1E-0で変更)',
+      envOut.outboxItems().length === 1, envOut.outboxItems().length);
+    check('flag OFF: 旧outboxが現在の物件(A)へ入っていない(Phase 1E-0で変更)',
+      envOut.rowsFor(PID_A).length === 0, envOut.rowsFor(PID_A).length);
+
+    /* storageList 自体の挙動(リモートのキーをそのまま返す)はPhase 1E-0でも従来どおり。
+       上のenvOutは旧outboxを意図的に送信しないため、通常保存を行う別envで確認する。 */
     check('flag OFF: storageList は従来どおりリモートのキーをそのまま返す',
       true);
-    var listedOff = await envOut.ctx.storageList('fireflow-binder:', true);
+    var envList = makeEnv({ scopeEnabled: false, currentPropertyId: PID_A });
+    await envList.ctx.storageSet(envList.ctx.keyFor('101'), 'v', true);
+    var listedOff = await envList.ctx.storageList('fireflow-binder:', true);
     check('flag OFF: storageList の返すキーが従来のまま', listedOff.keys.length === 1
       && listedOff.keys[0] === 'fireflow-binder:101', listedOff.keys);
   })().then(runG).catch(fail);
