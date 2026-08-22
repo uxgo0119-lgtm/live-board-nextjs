@@ -185,7 +185,14 @@
   /* ストア本体。
      adapters は { list(prefix), get(key), set(key, value), remove(key) } を持つ非同期I/O。
      index.html では「IndexedDB(必ず成功) + リモート(失敗時は送信キュー)」の既存機構を渡し、
-     テストではメモリ実装を渡す。ストア自身は保存先の種類を知らない。 */
+     テストではメモリ実装を渡す。ストア自身は保存先の種類を知らない。
+
+     [2026-08-22追加] 任意で getMany(prefix, keys) を持てる。prefixに一致する保存データを
+     1回の通信でまとめて返す取得口で、実装したアダプタでは復元時に get() を1件も呼ばない。
+     背景: 復元は「キー一覧 → キーごとに get()」という形だったため、実端末のStampStore
+     259件でページを開くたびに259回の kv_store GET(key=eq.stamp:<物件>:<部屋>)が飛んでいた
+     (2026-08-22 実Safariで確認、request stormの第2原因)。保存キーの形式・復元結果・
+     保存側の挙動は一切変えず、取得の通信回数だけを部屋数に比例しない形へ落とす。 */
   function createStampStore(options) {
     options = options || {};
     var adapters = options.adapters || {
@@ -229,7 +236,12 @@
 
     /* 予定情報を書き込む唯一の入口。
        - MASTER(knownRooms)に無い部屋は絶対に受け付けない(OCRからMASTERを作らないため)
-       - 受け付けた分だけ、メモリと保存先へ同じ内容で書く */
+       - 受け付けた分だけ、メモリと保存先へ同じ内容で書く
+
+       [2026-08-22変更 request storm 本体の修正]
+       メモリへの反映は【従来どおり同期】で行う(呼び出し元 applyStampRecordsToLb() は
+       putMany() の直後に同期で syncStampDataFromStore() を呼ぶため、ここを非同期化すると
+       画面に出なくなる)。変わったのは「保存先へ実際に送るかどうか」の判定だけ。 */
     function putMany(inputs, opts) {
       opts = opts || {};
       var known = knownRoomSet(opts.knownRooms);
@@ -242,20 +254,88 @@
 
       var saved = [];
       var rejected = [];
-      var writes = [];
+      var pending = [];
       list.forEach(function (input) {
         var record = buildRecord(input, { propertyKey: propertyKey, now: now, source: opts.source });
         if (!record.room) { rejected.push({ room: '', reason: 'EMPTY_ROOM' }); return; }
         if (known && !known.has(record.room)) { rejected.push({ room: record.room, reason: 'NOT_IN_MASTER' }); return; }
         records[record.room] = record;
         saved.push(record.room);
-        writes.push(adapters.set(keyFor(record.room), JSON.stringify(record)));
+        pending.push({ room: record.room, key: keyFor(record.room), record: record });
       });
-      return Promise.all(writes.map(function (p) {
-        return (p && typeof p.catch === 'function') ? p.catch(function () {}) : p;
-      })).then(function () {
+      return writeRecords(pending).then(function () {
         return { saved: saved, rejected: rejected };
       });
+    }
+
+    function ignoreWriteError(p) {
+      return (p && typeof p.catch === 'function') ? p.catch(function () {}) : p;
+    }
+    /* updated_at だけを除いた比較用の姿。updated_at は「どちらが新しいか」を決めるためだけの
+       項目で、記号・時刻・備考・チェック・要確認などの業務上の値は一切含まない。
+       buildRecord() が常に同じ順序で組み立てるので、文字列比較で厳密に比べられる。 */
+    function contentWithoutUpdatedAt(record) {
+      var copy = Object.assign({}, record);
+      copy.updated_at = '';
+      return JSON.stringify(copy);
+    }
+    /* 保存先から読んだ素のレコードを、復元(loadAll)とまったく同じ規則で正本の姿へ戻す。 */
+    function normalizeStoredRecord(parsed, room) {
+      if (!parsed) return null;
+      return buildRecord(Object.assign({}, parsed, { room: room }),
+        { propertyKey: propertyKey, now: parsed.updated_at });
+    }
+
+    /* [2026-08-22新設 request storm 本体の修正] 保存先へ実際に送る分だけを送る。
+
+       【直した症状(2026-08-22 実Safari / localhost:3000 で実測)】
+       Network履歴を削除して何も操作せず数秒待つだけで kv_store のリクエストが100件以上出た。
+       1件クリックして得たURLは
+         select=id&property_id=eq.<uuid>&key=eq.stamp:コスモ六甲ガーデンフォート:113
+         &shared=eq.true&owner_id=is.null
+       で、部屋番号だけが違うものが並んでいた。この形は window.storage.set() の既存行検索
+       (＝書き込みの前段)だけが作る。発火元は index.html の seedDemoState() で、
+       「デモを開く」たびに冒頭のハードコードされた予定情報129室ぶんを putMany() し、
+       1室につき「select id」＋「update/insert」の2リクエスト = 258リクエストを、
+       内容が1バイトも変わっていないのに毎回そのまま送り直していた
+       (リモートが500で落ちていると、その129件がそのまま送信キューへ積まれ、
+        5秒ごとの再送でさらに増え続ける)。
+
+       【直し方】新しい保存層もアダプタも増やさず、既にある一括取得(adapters.getMany、
+       index.html では storageListValues → kv_store の prefix 1回GET)を1回だけ使い、
+       「保存先に既に在る内容」と突き合わせる。updated_at を除いて完全一致する分だけ送らない。
+       送らないのは【送っても保存内容が1バイトも変わらない書き込み】だけなので、
+       点検済み・不在・キャンセル・サイン・時刻・stamp値・room状態の最終保存内容は変わらない。
+       1件でも違えば従来どおり送る(通信を減らすために保存判定を雑にしない)。
+
+       送らなかった分は、保存先側の updated_at をメモリの正本へ合わせておく。こうしないと
+       メモリだけが新しい updated_at を持ち、他の点検員が後から入れた本当の更新を
+       loadAll() の isNewer() が「古い」と誤判定して取りこぼす。
+
+       adapters.getMany を持たないアダプタ(メモリ実装・既存テスト)では、比較のために
+       1件ずつ読み直すと通信が部屋数に比例して元へ戻るため、従来どおり全件送る。 */
+    function writeRecords(pending) {
+      if (!pending.length) return Promise.resolve();
+      if (typeof adapters.getMany !== 'function') {
+        return Promise.all(pending.map(function (p) {
+          return ignoreWriteError(adapters.set(p.key, JSON.stringify(p.record)));
+        }));
+      }
+      return readRecordsFor(scopePrefix(), pending.map(function (p) { return p.key; }))
+        .then(function (byKey) {
+          var writes = [];
+          pending.forEach(function (p) {
+            var stored = normalizeStoredRecord(byKey[p.key], p.room);
+            if (stored && contentWithoutUpdatedAt(stored) === contentWithoutUpdatedAt(p.record)) {
+              // 送っても保存先の内容は変わらない。メモリの正本を保存先の姿へ揃えて終わり。
+              // (この待ち時間中に同じ部屋がもっと新しい内容で上書きされていたら触らない)
+              if (records[p.room] === p.record) p.record.updated_at = stored.updated_at;
+              return;
+            }
+            writes.push(ignoreWriteError(adapters.set(p.key, JSON.stringify(p.record))));
+          });
+          return Promise.all(writes);
+        });
     }
 
     function put(input, opts) {
@@ -271,15 +351,50 @@
       return (p && typeof p.catch === 'function') ? p.catch(function () {}) : Promise.resolve();
     }
 
+    /* 保存されている文字列(またはオブジェクト)を正本レコードの素の形へ戻す。
+       壊れていれば null。ここは1件取得でもまとめ取りでも共通で通す。 */
+    function parseRecordValue(value) {
+      if (!value) return null;
+      try {
+        var parsed = (typeof value === 'string') ? JSON.parse(value) : value;
+        if (!parsed || typeof parsed !== 'object') return null;
+        return parsed;
+      } catch (err) { return null; }
+    }
+
     function readRecord(key) {
-      return Promise.resolve(adapters.get(key)).then(function (value) {
-        if (!value) return null;
-        try {
-          var parsed = (typeof value === 'string') ? JSON.parse(value) : value;
-          if (!parsed || typeof parsed !== 'object') return null;
-          return parsed;
-        } catch (err) { return null; }
-      }).catch(function () { return null; });
+      return Promise.resolve(adapters.get(key)).then(parseRecordValue).catch(function () { return null; });
+    }
+
+    /* [2026-08-22追加 request storm対策] 復元対象のキーぶんの値をまとめて読む。
+       返り値は { key: 素のレコード or null }。
+
+       ・adapters.getMany があるとき : それ「だけ」を使う。1件ずつの adapters.get へは
+         絶対に落とさない(落とすと通信量が部屋数に比例して元へ戻り、stormが再発する)。
+         リモートが読めないときにローカルから復元するのは getMany 側の責務。
+       ・getMany が無いとき         : 従来どおり1件ずつ順に読む(メモリ実装・既存テスト用)。 */
+    function readRecordsFor(prefix, keys) {
+      if (typeof adapters.getMany !== 'function') {
+        return keys.reduce(function (chain, key) {
+          return chain.then(function (acc) {
+            return readRecord(key).then(function (parsed) { acc[key] = parsed; return acc; });
+          });
+        }, Promise.resolve({}));
+      }
+      return Promise.resolve(adapters.getMany(prefix, keys.slice())).then(function (byKey) {
+        byKey = byKey || {};
+        var out = {};
+        keys.forEach(function (key) {
+          out[key] = parseRecordValue(
+            Object.prototype.hasOwnProperty.call(byKey, key) ? byKey[key] : null);
+        });
+        return out;
+      }).catch(function () {
+        // getMany は例外を投げない契約だが、万一投げても1件ずつの再取得はしない。
+        var out = {};
+        keys.forEach(function (key) { out[key] = null; });
+        return out;
+      });
     }
 
     /* 復元。保存済みの正本をそのままメモリへ戻すだけで、値の再解釈はしない。
@@ -293,21 +408,27 @@
       var skipped = [];
       return Promise.resolve(adapters.list(prefix)).catch(function () { return []; }).then(function (keys) {
         keys = Array.isArray(keys) ? keys : [];
-        return keys.reduce(function (chain, key) {
-          return chain.then(function () {
-            var room = String(key).slice(prefix.length);
-            if (!room) return null;
-            if (known && !known.has(room)) { skipped.push(room); return null; }
-            return readRecord(key).then(function (parsed) {
-              if (!parsed) return null;
-              var record = buildRecord(Object.assign({}, parsed, { room: room }), { propertyKey: propertyKey, now: parsed.updated_at });
-              if (isNewer(record, records[room])) {
-                records[room] = record;
-                restored.push(room);
-              }
-            });
+        /* [2026-08-22変更 request storm対策] 先に「実際に復元するキー」だけへ絞り、
+           その分をまとめて1回で取る。絞り込み条件(空部屋名を捨てる / MASTERに無い部屋は
+           復元しない)も、キーの並び順も従来と同じなので、復元結果は1件も変わらない。 */
+        var targets = [];
+        keys.forEach(function (key) {
+          var room = String(key).slice(prefix.length);
+          if (!room) return;
+          if (known && !known.has(room)) { skipped.push(room); return; }
+          targets.push({ key: key, room: room });
+        });
+        return readRecordsFor(prefix, targets.map(function (t) { return t.key; })).then(function (byKey) {
+          targets.forEach(function (t) {
+            var parsed = byKey[t.key];
+            if (!parsed) return;
+            var record = buildRecord(Object.assign({}, parsed, { room: t.room }), { propertyKey: propertyKey, now: parsed.updated_at });
+            if (isNewer(record, records[t.room])) {
+              records[t.room] = record;
+              restored.push(t.room);
+            }
           });
-        }, Promise.resolve());
+        });
       }).then(function () {
         if (restored.length || opts.skipLegacyMigration) return { migrated: [] };
         return migrateLegacyKeys(known);
@@ -322,23 +443,31 @@
       var migrated = [];
       return Promise.resolve(adapters.list(LEGACY_KEY_PREFIX)).catch(function () { return []; }).then(function (keys) {
         keys = Array.isArray(keys) ? keys : [];
-        return keys.reduce(function (chain, key) {
-          return chain.then(function () {
-            var room = String(key).slice(LEGACY_KEY_PREFIX.length);
-            if (!room) return null;
-            if (known && !known.has(room)) return null;
-            return readRecord(key).then(function (parsed) {
+        /* [2026-08-22変更 request storm対策] 取得をまとめただけ。取り込む対象の判定
+           (旧キーが在る / MASTERに在る部屋だけ)も書き込みの順序も従来と同じで、
+           取り込む部屋が1室たりとも増えないようにしている。 */
+        var targets = [];
+        keys.forEach(function (key) {
+          var room = String(key).slice(LEGACY_KEY_PREFIX.length);
+          if (!room) return;
+          if (known && !known.has(room)) return;
+          targets.push({ key: key, room: room });
+        });
+        return readRecordsFor(LEGACY_KEY_PREFIX, targets.map(function (t) { return t.key; })).then(function (byKey) {
+          return targets.reduce(function (chain, t) {
+            return chain.then(function () {
+              var parsed = byKey[t.key];
               if (!parsed) return null;
               // 旧キーの中身は「旧STAMP_DATAのエントリ」。正本レコードへ器を移すだけ。
               var record = parsed.schema_version
-                ? buildRecord(Object.assign({}, parsed, { room: room }), { propertyKey: propertyKey, now: parsed.updated_at })
-                : fromLegacyEntry(room, parsed, { propertyKey: propertyKey, now: nowFn(), source: 'migrated_legacy' });
-              records[room] = record;
-              migrated.push(room);
-              return adapters.set(keyFor(room), JSON.stringify(record));
+                ? buildRecord(Object.assign({}, parsed, { room: t.room }), { propertyKey: propertyKey, now: parsed.updated_at })
+                : fromLegacyEntry(t.room, parsed, { propertyKey: propertyKey, now: nowFn(), source: 'migrated_legacy' });
+              records[t.room] = record;
+              migrated.push(t.room);
+              return adapters.set(keyFor(t.room), JSON.stringify(record));
             });
-          });
-        }, Promise.resolve());
+          }, Promise.resolve());
+        });
       }).then(function () { return { migrated: migrated }; }).catch(function () { return { migrated: migrated }; });
     }
 

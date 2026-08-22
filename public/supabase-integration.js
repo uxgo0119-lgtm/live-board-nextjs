@@ -347,6 +347,28 @@ const INITIAL_PROPERTY_ID = 'b6e18eed-f2f3-4674-812d-322732908616'; // コスモ
     return { keys: (data || []).map(function (r) { return r.key; }), prefix: prefix, shared: !!shared };
   }
 
+  /* [2026-08-19追加 request storm対策] prefixが一致する行を「キーと値ごと」1回のGETで取る。
+     従来 list() はキーだけを返し、値は1件ずつ get() で取り直していた。そのため129室の物件では
+     画面更新1回あたり binder 129回 + 点検時刻変更 129回 = 258回のGETが発生していた。
+
+     絞り込み条件(property_id / shared / owner_id / key)は get()・list() と1文字も変えていない。
+     RLS・物件スコープの効き方は1件取得のときと同じで、他物件の行が混ざることはない。
+
+     【重要】失敗は必ず例外で伝える(list() のように null を返して黙って空扱いにしない)。
+     呼び出し元は「取得できなかった」と「0件だった」を区別できなければならない。区別せずに
+     空扱いにすると、通信失敗時に全部屋が未点検に見えてしまう。 */
+  function kvListValuesRows(data) {
+    return (data || []).map(function (r) { return { key: r.key, value: r.value }; });
+  }
+  async function kvListValuesForProperty(propertyId, prefix, shared) {
+    var q = sb.from('kv_store').select('key,value').eq('shared', !!shared);
+    if (prefix) q = q.like('key', prefix + '%');
+    q = kvScopeQuery(q, propertyId, shared);
+    var { data, error } = await q;
+    if (error) throw error;
+    return { items: kvListValuesRows(data), prefix: prefix, shared: !!shared };
+  }
+
   function installStorageShim() {
     window.storage = {
       async get(key, shared, propertyId) {
@@ -409,6 +431,16 @@ const INITIAL_PROPERTY_ID = 'b6e18eed-f2f3-4674-812d-322732908616'; // コスモ
         if (error) return null;
         return { keys: (data || []).map(function (r) { return r.key; }), prefix: prefix, shared: !!shared };
       },
+      // list() の値つき版。詳しい経緯は kvListValuesForProperty() の上のコメントを参照。
+      async listValues(prefix, shared, propertyId) {
+        if (propertyId && propertyId !== currentPropertyId) return kvListValuesForProperty(propertyId, prefix, shared);
+        var q = sb.from('kv_store').select('key,value').eq('property_id', currentPropertyId).eq('shared', !!shared);
+        if (prefix) q = q.like('key', prefix + '%');
+        q = shared ? q.is('owner_id', null) : q.eq('owner_id', currentUser.id);
+        var { data, error } = await q;
+        if (error) throw error;
+        return { items: kvListValuesRows(data), prefix: prefix, shared: !!shared };
+      },
     };
   }
 
@@ -441,7 +473,15 @@ const INITIAL_PROPERTY_ID = 'b6e18eed-f2f3-4674-812d-322732908616'; // コスモ
       }
     );
 
-    channel.subscribe();
+    /* [2026-08-22追加 request storm 完全修正] 購読の成否をLB本体へ知らせる。
+       LB側(index.html の installRemoteRefreshTriggers)は、1秒ポーリングを廃止して
+       「他端末の更新はRealtimeの通知で知る」設計へ変えたため、購読できているかどうかで
+       予備の読み直しを出すか決める必要がある。購読処理自体・購読対象・payloadの扱いは
+       1文字も変えていない(subscribe()にstatusコールバックを渡しただけ)。 */
+    channel.subscribe(function (status) {
+      document.dispatchEvent(new CustomEvent('sb-realtime-status', { detail: { status: status } }));
+      if (typeof window.onRealtimeStatus === 'function') window.onRealtimeStatus(status);
+    });
     window.__sbChannel = channel;
   }
 

@@ -560,7 +560,11 @@ function runG() {
     // index.html 内の storageSet/Get/Delete/List の第1引数の式をすべて集め、
     // 監査済みの一覧と完全一致することを確認する。新しい業務キーが増えたのに
     // property scope へ登録し忘れたら、このテストが落ちる。
-    var re = /storage(?:Set|Get|Delete|List)\(/g;
+    /* [2026-08-22拡張] まとめ取り(storageListValues)も監査対象へ入れる。
+       従来の正規表現は `storageList(` で終端していたため、2026-08-19に追加された
+       storageListValues() の呼び出し(部屋状態のまとめ取り・在席一覧)を1件も見ていなかった。
+       業務キーの取りこぼし監査という目的からすると、これは対象外にしてよい理由が無い。 */
+    var re = /storage(?:Set|Get|Delete|ListValues|List)\(/g;
     var found = {};
     var m;
     while ((m = re.exec(html)) !== null) {
@@ -589,7 +593,7 @@ function runG() {
       'BUILDING_NOTES_KEY',
       'CURRENT_PROPERTY_KEY',
       'EQUIPMENT_LIST_KEY',
-      'PRESENCE_KEY_PREFIX',
+      'PRESENCE_KEY_PREFIX',        // 在席一覧のまとめ取り(storageListValues)
       'PRESENCE_KEY_PREFIX + name',
       'PROGRESS_LOG_KEY',
       'SCHEDULE_DAYS_KEY',
@@ -601,8 +605,7 @@ function runG() {
       'item.rawKey',        // 送信キュー再送(スコープ済みキーをそのまま送る内部経路)
       'key',                // storageSet/Get/Delete の定義とStampStoreアダプタ
       'keyFor(room)',
-      'prefix',             // storageList の定義
-      'result.keys[i]',     // storageList が返した(スコープを外した)キーの再読込
+      'prefix',             // storageList / storageListValues の定義と readRoomValuesBulk
       'scheduleOverrideKeyFor(room)',
     ].sort();
     check('storage API の呼び出し箇所が監査済み一覧と完全一致する', JSON.stringify(actual) === JSON.stringify(expected),

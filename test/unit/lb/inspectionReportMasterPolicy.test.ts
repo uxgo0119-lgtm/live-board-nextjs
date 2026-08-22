@@ -77,6 +77,9 @@ const sandbox: any = {
   seedScheduleDaysIfNeeded: () => {},
   clearDemoStampDataForPropertyChange: () => { resetCalls.push('clearDemoStampData'); },
   reloadStampStoreForCurrentProperty: () => { resetCalls.push('reloadStampStore'); },
+  // [2026-08-22追加] 1秒ポーリング廃止に伴い、物件が入れ替わる経路は読み直しを明示依頼する
+  // (public/index.html の requestRemoteRefresh)。ここでは呼ばれたことだけ記録する。
+  requestRemoteRefresh: (reason: string) => { resetCalls.push('requestRemoteRefresh:' + reason); },
   initScheduleLabels: () => {}, renderFilterChips: () => {}, renderFloors: () => {},
   renderPropertyInfo: () => {}, showView: () => {}, syncDateDisplays: () => {},
   siteSupervisorLocked: false,

@@ -4355,16 +4355,77 @@
   // [2026-08-18追加 Phase 1C] propertyId不明の旧outboxについての警告は1回だけ出す
   // (5秒ごとの再送でコンソールを埋めないため)。
   var warnedUnknownPropertyOutbox = false;
-  function scheduleOutboxRetry() {
-    if (outboxRetryTimer) return;
-    outboxRetryTimer = setInterval(flushOutbox, 5000);
+  /* [2026-08-22追加 request storm 完全修正] 再送間隔。
+     kv_storeが500やタイムアウトで落ちている間、5秒ごとに同じ件数を投げ続けると、利用者から見て
+     「何も操作していないのに通信が止まらない」状態そのものになる(実Safariで観測した storm の
+     一部はこれ)。1件も送れずリモート失敗だけが続いた回は待ち時間を倍にし、60秒で頭打ちにする。
+     1件でも送れた回・オンライン復帰・画面復帰では必ず既定の5秒へ戻すため、復旧の取りこぼしは
+     起きない。送信キューのitem・順序・判定・保存内容には一切触っていない。 */
+  var OUTBOX_RETRY_BASE_MS = 5000;
+  var OUTBOX_RETRY_MAX_MS = 60000;
+  var outboxRetryDelayMs = OUTBOX_RETRY_BASE_MS;
+  /* opts省略(＝storageSet/storageDeleteからの通常呼び出し)のときの動作は従来と同じ
+     「タイマーが無ければ作る、あれば何もしない」。optsは flushOutbox() が1回分の結果を
+     伝えるためだけに使う。 */
+  function scheduleOutboxRetry(opts) {
+    if (!outboxRetryTimer) {
+      // 送信キューが空になって止まった後の、新しい失敗。待ち時間は必ず既定へ戻す。
+      if (!opts) outboxRetryDelayMs = OUTBOX_RETRY_BASE_MS;
+      outboxRetryTimer = setInterval(flushOutbox, outboxRetryDelayMs);
+      return;
+    }
+    if (!opts) return;
+    var next = opts.progress ? OUTBOX_RETRY_BASE_MS
+      : (opts.failed ? Math.min(outboxRetryDelayMs * 2, OUTBOX_RETRY_MAX_MS) : outboxRetryDelayMs);
+    if (next === outboxRetryDelayMs) return;
+    outboxRetryDelayMs = next;
+    clearInterval(outboxRetryTimer);
+    outboxRetryTimer = setInterval(flushOutbox, outboxRetryDelayMs);
   }
+  /* [2026-08-22追加 request storm 実ブラウザ再発の修正]
+
+     【実測された症状】2026-08-22 実Safari / localhost:3000 で、Network履歴を削除して何も
+     操作せず数秒待つだけで kv_store のリクエストが100件以上発生した。1件クリックして得た
+     URLは次の形で、部屋番号だけが違うものが延々と並んでいた。
+       select=id&property_id=eq.<uuid>&key=eq.stamp:コスモ六甲ガーデンフォート:113
+       &shared=eq.true&owner_id=is.null
+     このパラメータ順を作るのは window.storage.set() の既存行検索だけ
+     (supabase-integration.js:440。別物件経路 kvSetForProperty は select,key,shared,
+     property_id,owner_id の順になるので不一致)。つまり storm の正体は「読み込み」ではなく
+     【書き込みの再送】であり、その唯一の定期実行元がこの flushOutbox() である。
+
+     【なぜ止まらないか】
+       1. リモート保存が失敗し続けている(kv_store 500。docs/FireFlow_Supabase_kv_store_500_
+          Audit_2026-08-19.md)ため、送信キューのitemが1件も減らない。
+       2. flushOutbox() は送信可能item数ぶん直列に storageSet() を呼ぶ。1件につき
+          「select id」+「update or insert」の2リクエスト。stampが259件あれば1passで518。
+       3. 5秒ごとに何度でも同じ全件を再送する。しかも再入ガードが無いので、1passが5秒を
+          超えると次のtickが重なり、重なるほど遅くなってさらに重なる
+          (2026-08-19に loadAll() で直したのとまったく同じ悪循環が、こちらに残っていた)。
+
+     【直し方(最小)】送信の判定・順序・保存内容には一切触らず、次の2つだけを足す。
+       ・再入ガード … loadAll() と同じ。実行中のtickは捨てる。
+       ・連続失敗の打ち切り … 同じ保存先へ連続で失敗したら、その回の残りは試さない。
+         全item同じ kv_store エンドポイントへ送っているので、続けても結果は同じで、
+         得られるものが無いまま件数ぶんのリクエストだけが増える。
+         itemは1件も消さず・書き換えず、次のtickでまた先頭から試す。
+         成功が1件でも挟まれば連続失敗数は0へ戻るため、「1件だけ送れないitemがあると
+         後続が送れなくなる」ことは無い。
+
+     どちらもフラグを関数オブジェクト自身に持たせている(新しいモジュール変数を作らない)。
+     これにより flushOutbox の関数ソースだけをvmへ載せる既存テストの環境をそのまま使える。 */
   async function flushOutbox() {
     if (!window.storage) return;
     // 2026-07-20改善: オフライン中は送信を試みても必ず失敗するだけなので、無駄な待ち時間・
     // エラーを発生させないよう、そもそも試行しない(データはIndexedDBの送信キューに安全に
     // 残ったままで、オンライン復帰時に'online'イベントから改めて呼ばれる)。
     if ('onLine' in navigator && !navigator.onLine) { updateSyncBadge(); return; }
+    if (flushOutbox.inFlight) return;
+    flushOutbox.inFlight = true;
+    try {
+    // 1回のflushで許す「連続リモート失敗」の上限。これを超えたらその回は打ち切る。
+    var CONSECUTIVE_REMOTE_FAILURE_LIMIT = 3;
+    var consecutiveRemoteFailures = 0;
     var items = await lcGetAll('outbox');
     if (!items.length) {
       if (outboxRetryTimer) { clearInterval(outboxRetryTimer); outboxRetryTimer = null; }
@@ -4418,12 +4479,26 @@
            誤認し、直前に積み直された未送信データごと lcDelete していたため、
            送れていない点検記録が「同期完了」表示とともに黙って消えていた。
            FireFlowでは通信失敗そのものより、失敗したデータを成功と思って捨てる方が重大。 */
-        if (!result || result.remote !== true) continue; // 送信キューに残したまま次回へ持ち越す
+        if (!result || result.remote !== true) {
+          // 送信キューに残したまま次回へ持ち越す。
+          consecutiveRemoteFailures++;
+          if (consecutiveRemoteFailures >= CONSECUTIVE_REMOTE_FAILURE_LIMIT) break;
+          continue;
+        }
         await lcDelete('outbox', item.key);
         sentCount++;
+        consecutiveRemoteFailures = 0;
       } catch (err) {
         // このアイテムはまだ送れない。次回のリトライへ持ち越す(他のアイテムの送信は継続する)。
+        consecutiveRemoteFailures++;
+        if (consecutiveRemoteFailures >= CONSECUTIVE_REMOTE_FAILURE_LIMIT) break;
       }
+    }
+    /* [2026-08-22追加] この1回の結果を再送間隔へ反映する。タイマーが動いている時だけ調整し、
+       ここで新しいタイマーを作ることはしない(作るのは従来どおり storageSet/storageDelete の
+       失敗時だけ)。 */
+    if (outboxRetryTimer) {
+      scheduleOutboxRetry({ progress: sentCount > 0, failed: sentCount === 0 && consecutiveRemoteFailures > 0 });
     }
     if (heldCount > 0 && !warnedUnknownPropertyOutbox) {
       warnedUnknownPropertyOutbox = true;
@@ -4438,6 +4513,9 @@
       if (!remaining.length) { showSyncCompleteBriefly(); return; }
     }
     updateSyncBadge();
+    } finally {
+      flushOutbox.inFlight = false;
+    }
   }
 
   // window.storage(set/get/delete/list)の直接呼び出しの代わりに、必ずこちらを使う。
@@ -4549,12 +4627,94 @@
     }
   }
 
+  /* [2026-08-19追加] storageList()の「値つき」版。prefixが一致する保存データを、キーと値ごと
+     1回の通信でまとめて取得する。返り値は { rawKey: value } の素のオブジェクト。
+
+     storageList()との違いは2点だけ:
+       ・値まで返す(呼び出し元が1件ずつstorageGet()し直さなくてよい)
+       ・取れなかったときは必ず例外を投げる(storageList()のように空を返して黙らない)
+     後者が重要で、「通信できなかった」と「本当に0件だった」を呼び出し元が区別できないと、
+     通信失敗の瞬間に全部屋が未点検として描画されてしまう。
+
+     保存キーの形式・スコープの掛け方は storageGet() と完全に同じ(applyPropertyScope()を
+     1回だけ通す)。取得できた値は storageGet() と同じくローカル(IndexedDB)へも書き戻すので、
+     オフライン時の復元元は今までどおり維持される。 */
+  async function storageListValues(prefix, shared, opts) {
+    var scope = applyPropertyScope(prefix, opts);
+    if (!window.storage || typeof window.storage.listValues !== 'function') {
+      throw new Error('window.storage.listValues is not ready yet');
+    }
+    var result = await window.storage.listValues(scope.key, shared, scope.propertyId);
+    var items = (result && result.items) ? result.items : [];
+    var byKey = {};
+    for (var i = 0; i < items.length; i++) {
+      // リモートが返すキーはスコープ済みの形。ローカルのキャッシュキーもスコープ済みの形で
+      // 作られている(storageGet()と同じ)ため、キャッシュにはそのまま渡す。
+      // 呼び出し元へ返すキーだけ、従来どおりスコープを外した形へ戻す。
+      var storedKey = String(items[i].key);
+      var rawKey = scope.propertyId ? propertyUnscopedKey(storedKey, scope.propertyId) : storedKey;
+      byKey[rawKey] = items[i].value;
+      lcPut('cache', { key: lcCacheKey(storedKey, shared), value: items[i].value, updatedAt: Date.now() })
+        .catch(function () {});
+    }
+    return byKey;
+  }
+
+  /* storageGet()がリモート失敗時に行う「ローカル(IndexedDB)から読み直す」処理だけを取り出したもの。
+     storageListValues()でまとめて取れなかったキーを、通信を一切増やさずに補うために使う。
+     読めなければ null(storageGet()が例外を投げる場合と同じ扱い)。 */
+  async function readValueFromLocalCache(rawKey, shared) {
+    try {
+      var scope = applyPropertyScope(rawKey);
+      var cached = await lcGet('cache', lcCacheKey(scope.key, shared));
+      return cached ? { key: rawKey, value: cached.value, shared: !!shared } : null;
+    } catch (err) {
+      return null;
+    }
+  }
+
+  /* [2026-08-19追加] 全部屋分の保存データを取得する唯一の経路。rooms の並び順どおりに
+     { key, value, shared } または null(=保存が無い/読めない)の配列を返す。
+
+     通信は「prefixで1回」だけ。prefixで取れなかったキーは、リモートを追加で叩かずに
+     ローカルキャッシュから補う。これにより、1部屋ずつstorageGet()していた従来の
+     N回の通信が、部屋数に関係なく1回になる。
+
+     結果は従来のstorageGet()経路と一致する:
+       ・リモートに在る            → リモートの値(従来と同じ)
+       ・リモートに無い            → ローカルキャッシュの値、無ければnull
+                                     (従来: window.storage.getが例外→キャッシュ→無ければnull)
+       ・リモート自体が読めない    → 全部屋ローカルキャッシュ(従来: 1件ずつ同じ結果) */
+  async function readRoomValuesBulk(rooms, keyForFn, prefix) {
+    var byKey = null;
+    try {
+      byKey = await storageListValues(prefix, true);
+    } catch (err) {
+      // オフライン・window.storage未初期化・リモートエラー。ローカルだけで復元する
+      // (ここで1件ずつのリモート再取得へ切り替えない。それをやると通信量が元に戻る)。
+      byKey = null;
+    }
+    return Promise.all(rooms.map(function (room) {
+      var rawKey = keyForFn(room);
+      if (byKey && Object.prototype.hasOwnProperty.call(byKey, rawKey)) {
+        return Promise.resolve({ key: rawKey, value: byKey[rawKey], shared: true });
+      }
+      return readValueFromLocalCache(rawKey, true);
+    }));
+  }
+
   // 2026-07-20改善: 'offline'イベントの監視を追加(従来は'online'のみ)。オフラインになった
   // 瞬間に画面上部のステータス表示を即座に「オフライン」系へ切り替えられるようにした。
-  window.addEventListener('online', function () { updateSyncBadge(); flushOutbox(); });
+  /* [2026-08-22追加] オンライン復帰・画面復帰は「今すぐ送れるようになったかもしれない」合図なので、
+     待ち延ばし(backoff)を必ず既定へ戻してから送信を試す。戻さないと、圏外から復帰しても最大60秒
+     待たされることになる。 */
+  function resetOutboxRetryBackoff() {
+    if (outboxRetryTimer) scheduleOutboxRetry({ progress: true });
+  }
+  window.addEventListener('online', function () { updateSyncBadge(); resetOutboxRetryBackoff(); flushOutbox(); });
   window.addEventListener('offline', function () { updateSyncBadge(); });
   document.addEventListener('visibilitychange', function () {
-    if (document.visibilityState === 'visible') { updateSyncBadge(); flushOutbox(); }
+    if (document.visibilityState === 'visible') { updateSyncBadge(); resetOutboxRetryBackoff(); flushOutbox(); }
   });
   document.addEventListener('supabase-ready', flushOutbox);
 
@@ -4597,6 +4757,27 @@
       list: function (prefix) { return listKeysLocalFirst(prefix); },
       get: function (key) {
         return storageGet(key, true).then(function (r) { return r ? r.value : null; }).catch(function () { return null; });
+      },
+      /* [2026-08-22追加 request storm 第2原因の修正] prefixに一致する予定情報を1回の通信で
+         まとめて取る。StampStoreの復元はこちらだけを通るため、部屋ごとの get()(=storageGet
+         → kv_store の key=eq.stamp:<物件>:<部屋> GET)は1回も出ない。
+
+         【直した症状】実端末のStampStoreは259件あり、復元のたびに259回のGETが飛んでいた
+         (2026-08-22 実Safari / localhost:3000 で実測)。部屋数に比例して増えるため、
+         129室の物件でも約129回になる。
+
+         【方針】新しい保存層は作らず、既にある1本道(readRoomValuesBulk → storageListValues
+         → window.storage.listValues)をそのまま使う。保存キーの形式・物件スコープの掛け方・
+         復元結果は一切変えない。リモートが読めないときはローカル(IndexedDB)から復元し、
+         1件ずつのリモート再取得へは戻さない(戻すと通信量が元に戻る)。 */
+      getMany: function (prefix, keys) {
+        return readRoomValuesBulk(keys, function (k) { return k; }, prefix).then(function (results) {
+          var byKey = {};
+          for (var i = 0; i < keys.length; i++) {
+            byKey[keys[i]] = results[i] ? results[i].value : null;
+          }
+          return byKey;
+        }).catch(function () { return {}; });
       },
       set: function (key, value) { return storageSet(key, value, true); },
       remove: function (key) { return storageDelete(key, true); }
@@ -4838,6 +5019,13 @@
 
   function keyFor(room) { return 'fireflow-binder:' + room; }
   function statusOf(room) { var s = state[room]; return s ? s.status : 'pending'; }
+
+  /* [2026-08-19追加] 全部屋分をまとめて1回で取得するときに使う、保存キーの先頭部分。
+     keyFor() / scheduleOverrideKeyFor() の「部屋番号より前」と必ず同じ文字列であること。
+     ここがずれると復元できなくなるため、request storm専用テストで一致を機械確認している。
+     保存キーの形式そのものは変更していない(部屋ごとのキーは今までどおり)。 */
+  var BINDER_KEY_PREFIX = 'fireflow-binder:';
+  var SCHEDULE_OVERRIDE_KEY_PREFIX = 'fireflow-schedule-override:';
 
   /* ---- 点検希望時刻の当日変更（点検希望時刻連絡表の取り込み内容とは別に、
      当日発生した時間変更だけを部屋ごとに上書きできるようにする。取り込み元データ
@@ -5562,6 +5750,13 @@
     // 削除確認ダイアログ用の強調背景(ぼかし)は、閉じる経路(キャンセル/実行/背景タップ等)を
     // 問わず、hideBackdrop()を通る限りここで必ず後始末する。
     backdrop.classList.remove('modal-backdrop-strong');
+    /* [2026-08-22追加 request storm 完全修正] パネルを開いている間に来た更新通知の持ち越し。
+       loadAll()は入力中の画面を書き換えないよう「パネルが開いている間は読まない」ため、
+       1秒ポーリングが無くなった今は、閉じたここで1回だけ読み直す必要がある。 */
+    if (loadAllDeferredRefresh) {
+      loadAllDeferredRefresh = false;
+      requestRemoteRefresh('panel-closed');
+    }
   }
 
   /* ---- 設備点検（消防用設備等リストの個別タップ記録） ---- */
@@ -6212,35 +6407,62 @@
   var PRESENCE_KEY_PREFIX = 'fireflow-presence:';
   var PRESENCE_ACTIVE_MS = 90 * 1000; // 90秒以内の合図があれば「今点検中」とみなす
 
-  function sendPresenceHeartbeat() {
+  /* [2026-08-22変更 request storm 完全修正] 在席の合図は「20秒ごとの無条件送信」をやめ、
+     利用者が実際に操作したときだけ(最短20秒間隔で)送る。
+
+     【理由】従来は setInterval(sendPresenceHeartbeat, 20000) により、端末を置いたまま何も
+     していない間も 20秒ごとに kv_store へ書き込み(select id + update の2リクエスト)が出ていた。
+     これは「ユーザー操作なし・データ変更なし」でも通信が止まらない状態そのもので、今回の
+     IDLE通信ゼロという設計目標に反する。
+     【壊していないこと】受信側 loadActiveInspectors() の判定は「90秒以内に合図があれば点検中」
+     (PRESENCE_ACTIVE_MS)のまま。操作している端末は20秒間隔で合図を出し続けるので、点検中の
+     点検員は従来どおり一覧に出る。90秒以上まったく操作していない端末が一覧から外れるのは、
+     「現在点検中のメンバー」という表示の意味としてむしろ正しい。 */
+  var PRESENCE_MIN_INTERVAL_MS = 20 * 1000;
+  var lastPresenceHeartbeatAt = 0;
+
+  function sendPresenceHeartbeat(opts) {
     if (!window.storage) return;
     var name = document.getElementById('inspectorName').value;
     if (!name) return;
+    var now = Date.now();
+    // 起動直後・点検員名の変更は force で必ず送る。それ以外(操作のたび)は20秒に1回へ間引く。
+    if (!(opts && opts.force === true) && (now - lastPresenceHeartbeatAt) < PRESENCE_MIN_INTERVAL_MS) return;
+    lastPresenceHeartbeatAt = now;
     try {
-      storageSet(PRESENCE_KEY_PREFIX + name, String(Date.now()), true).catch(function() {});
+      storageSet(PRESENCE_KEY_PREFIX + name, String(now), true).catch(function() {});
     } catch (err) {}
   }
 
+  function installPresenceActivityTriggers() {
+    if (installPresenceActivityTriggers.installed) return;
+    installPresenceActivityTriggers.installed = true;
+    // captureで拾うので、個々のボタンのhandlerを1つも書き換えずに「操作した」だけを見られる。
+    ['pointerdown', 'keydown'].forEach(function (type) {
+      document.addEventListener(type, function () { sendPresenceHeartbeat(); }, true);
+    });
+  }
+
+  /* [2026-08-22変更 request storm 完全修正] 従来は list でキーを取ってから1件ずつ storageGet
+     しており(点検員の人数ぶんのGET)、進捗詳細パネルを開いている間は renderFloors() のたびに
+     それが繰り返されていた。loadAll()・StampStoreで既に使っている「まとめ取り」1本
+     (storageListValues)へ置き換える。判定(90秒以内)・並び順・戻り値の形は従来と同じ。 */
   async function loadActiveInspectors() {
     if (!window.storage) return [];
+    var byKey = null;
     try {
-      var result = await storageList(PRESENCE_KEY_PREFIX, true);
-      if (!result || !result.keys) return [];
-      var now = Date.now();
-      var active = [];
-      for (var i = 0; i < result.keys.length; i++) {
-        var name = result.keys[i].slice(PRESENCE_KEY_PREFIX.length);
-        try {
-          var entry = await storageGet(result.keys[i], true);
-          if (entry && entry.value && (now - parseInt(entry.value, 10)) < PRESENCE_ACTIVE_MS) {
-            active.push(name);
-          }
-        } catch (err) { /* skip */ }
-      }
-      return active.sort();
+      byKey = await storageListValues(PRESENCE_KEY_PREFIX, true);
     } catch (err) {
-      return [];
+      return [];   // 従来どおり、読めなければ空扱いにするだけでアプリは止めない
     }
+    var now = Date.now();
+    var active = [];
+    Object.keys(byKey).forEach(function (rawKey) {
+      var at = parseInt(byKey[rawKey], 10);
+      if (!isFinite(at) || (now - at) >= PRESENCE_ACTIVE_MS) return;
+      active.push(rawKey.slice(PRESENCE_KEY_PREFIX.length));
+    });
+    return active.sort();
   }
 
   async function renderActiveInspectors() {
@@ -8177,10 +8399,30 @@
     refreshVisitTimesList(room);
   }
 
+  /* [2026-08-19追加] loadAll()の再入ガード。loadAll()は1秒ごとのsetIntervalから呼ばれるが、
+     通信が1秒以内に終わらないと次のtickが重なって走り、遅いほど通信が増える悪循環になる
+     (回線が細い現場ほど悪化する)。実行中は次のtickを捨てる。falseへ戻すのは必ずfinallyで、
+     途中で例外が出ても二度と動かなくなることはない。 */
+  var loadAllInFlight = false;
+  /* [2026-08-22追加] パネルを開いている間に来た更新通知の持ち越し。1秒ポーリングをやめた以上、
+     「開いている間は読まない」で捨ててしまうと、閉じたあと二度と反映されない可能性がある。
+     閉じたとき(hideBackdrop)に1回だけ読み直す。 */
+  var loadAllDeferredRefresh = false;
+
   async function loadAll() {
     var panelOpen = document.getElementById('panel').style.display === 'block'
       || document.getElementById('photoPanel').style.display === 'block';
-    if (panelOpen) return;
+    if (panelOpen) { loadAllDeferredRefresh = true; return; }
+    if (loadAllInFlight) return;
+    loadAllInFlight = true;
+    try {
+      await loadAllInner();
+    } finally {
+      loadAllInFlight = false;
+    }
+  }
+
+  async function loadAllInner() {
     var allRooms = [];
     FLOORS.forEach(function(f) { allRooms = allRooms.concat(f.rooms); });
 
@@ -8206,12 +8448,13 @@
       if (!roomInCurrentProperty[room]) { delete scheduleOverrides[room]; delete lastRawScheduleOverrideByRoom[room]; prunedAny = true; }
     });
 
-    var results = await Promise.all(allRooms.map(function(room) {
-      return storageGet(keyFor(room), true).catch(function() { return null; });
-    }));
-    var overrideResults = await Promise.all(allRooms.map(function(room) {
-      return storageGet(scheduleOverrideKeyFor(room), true).catch(function() { return null; });
-    }));
+    /* [2026-08-19変更 request storm対策] 従来はここで部屋ごとに storageGet() を呼んでいた。
+       129室の物件では 129(binder) + 129(点検時刻変更) = 258回のGETが、1秒ごとに永久に
+       発生していた。取得内容・結果は変えずに、prefixでまとめて取る2回の通信へ置き換える
+       (部屋数が増えても通信回数は2回のまま)。保存キーの形式も、どの部屋にどの値を割り当てるかも
+       従来と同じで、割り当てはキーの完全一致で行う。 */
+    var results = await readRoomValuesBulk(allRooms, keyFor, BINDER_KEY_PREFIX);
+    var overrideResults = await readRoomValuesBulk(allRooms, scheduleOverrideKeyFor, SCHEDULE_OVERRIDE_KEY_PREFIX);
 
     var changed = prunedAny;
     for (var i = 0; i < allRooms.length; i++) {
@@ -8234,6 +8477,95 @@
       }
     }
     if (changed) renderFloors();
+  }
+
+  /* ============================================================
+     [2026-08-22新設 request storm 完全修正] 画面更新(loadAll)を起こす唯一の窓口。
+
+     【実ブラウザで確定した症状】localhost:3000 のSafariで、Network履歴を削除して何も操作
+     しなくても、kv_store へのリクエストが短時間で148件出続けた。1件のURLは
+
+         select=key,value & property_id=eq.<uuid>
+         & key=like.fireflow-schedule-override:%25 & shared=eq.true & owner_id=is.null
+
+     で、これは loadAllInner() の readRoomValuesBulk() が出すまとめ取りそのものである
+     (この形を作るコードは public/ 配下で storageListValues → window.storage.listValues の
+     1本だけ)。つまり 2026-08-19 の修正で「1tickあたりの通信量」は 258 → 2 に減っていたが、
+     【何も変わっていない間も1秒ごとに叩き続ける】という設計自体はそのまま残っていた。
+     2 GET/秒 × 74秒 = 148件で、観測値と一致する。
+
+     【ROOT_CAUSE】部屋状態の確認手段が1秒ポーリングしか無かったこと。
+     利用者が何もしていない・データも変わっていない時間帯にも、同じ内容を延々と取り直していた。
+
+     【直し方】setInterval(loadAll, 1000) を廃止し、「本当に必要なとき」だけ読み直す。
+       ・起動直後                     … runMainAppBootSequence() の loadAll()
+       ・他端末が書き込んだとき       … Realtime(kv_store購読)の 'sb-realtime-update'
+       ・オンライン復帰               … 'online'
+       ・画面へ戻ってきたとき         … 'visibilitychange'(visible) / 'focus'
+       ・物件の切り替え               … Excel取込・新規物件作成の直後
+       ・パネルを閉じたとき           … 開いている間に来た通知の持ち越し(hideBackdrop)
+
+     Realtime は supabase-integration.js が既に kv_store を購読済みで、購読の成否は
+     'sb-realtime-status' で届く(今回そのdispatchだけを足した)。新しい同期基盤・新しい保存層は
+     作っていない。他端末の更新は、従来の「最大1秒遅れ」から「通知を受けた時点」へ変わる。
+
+     【Realtimeが繋がらない場合だけの予備】購読できていない間に限り、60秒に1回だけ読み直す
+     (2 GET/60秒)。購読できた瞬間に必ず止める。これは「10秒・30秒へ変えて誤魔化す」ための
+     ものではなく、Realtimeという通知経路が使えない環境で他端末同期を完全に失わないための
+     縮退動作で、正常時(購読成功)は1件も出さない。
+     ============================================================ */
+  var REMOTE_REFRESH_DEBOUNCE_MS = 600;
+  var REMOTE_REFRESH_FALLBACK_MS = 60000;
+  var remoteRefreshTimer = null;
+  var remoteRefreshFallbackTimer = null;
+  var realtimeSyncLive = false;
+  var lastRemoteRefreshReason = null;
+
+  /* 短時間に何件通知が来ても、読み直しは1回にまとめる(129室を一括保存した直後などに、
+     部屋数ぶんのRealtime通知が届いても通信は2回のまま)。 */
+  function requestRemoteRefresh(reason) {
+    lastRemoteRefreshReason = reason || 'unknown';
+    if (remoteRefreshTimer) return;
+    remoteRefreshTimer = setTimeout(function () {
+      remoteRefreshTimer = null;
+      loadAll();
+    }, REMOTE_REFRESH_DEBOUNCE_MS);
+  }
+
+  function setRealtimeSyncLive(live) {
+    realtimeSyncLive = !!live;
+    if (realtimeSyncLive) {
+      if (remoteRefreshFallbackTimer) { clearInterval(remoteRefreshFallbackTimer); remoteRefreshFallbackTimer = null; }
+      return;
+    }
+    if (!remoteRefreshFallbackTimer) {
+      remoteRefreshFallbackTimer = setInterval(function () { requestRemoteRefresh('realtime-down'); }, REMOTE_REFRESH_FALLBACK_MS);
+    }
+  }
+
+  function installRemoteRefreshTriggers() {
+    if (installRemoteRefreshTriggers.installed) return;
+    installRemoteRefreshTriggers.installed = true;
+    window.addEventListener('online', function () { requestRemoteRefresh('online'); });
+    window.addEventListener('focus', function () { requestRemoteRefresh('focus'); });
+    document.addEventListener('visibilitychange', function () {
+      if (document.visibilityState === 'visible') requestRemoteRefresh('visible');
+    });
+    document.addEventListener('sb-realtime-update', function (ev) {
+      // kv_store 以外のテーブル(room_results等)は部屋一覧の保存先ではないので読み直さない。
+      var table = (ev && ev.detail) ? ev.detail.table : null;
+      if (table && table !== 'kv_store') return;
+      requestRemoteRefresh('realtime');
+    });
+    document.addEventListener('sb-realtime-status', function (ev) {
+      var status = (ev && ev.detail) ? ev.detail.status : null;
+      setRealtimeSyncLive(status === 'SUBSCRIBED');
+    });
+    // リモートは在るが、まだRealtimeの購読結果が届いていない状態。予備の読み直しを始める
+    // (購読成功が届いた時点で上の 'sb-realtime-status' が必ず止める)。
+    document.addEventListener('supabase-ready', function () {
+      if (!realtimeSyncLive) setRealtimeSyncLive(false);
+    });
   }
 
   document.getElementById('photoInput').addEventListener('change', function(e) {
@@ -9021,6 +9353,9 @@
     renderFloors();
     renderPropertyInfo();
     showView('home');
+    /* [2026-08-22追加 request storm 完全修正] parseExcelAndRebuild()と同じ理由。物件が入れ替わった
+       ので保存済み点検状態を読み直す(この時点のFLOORSは空なので通信は最小のまま)。 */
+    requestRemoteRefresh('property-change');
     showToast('「' + PROPERTY.name + '」を新規作成しました(部屋はまだ登録されていません。住戸一覧の取込または手動追加で登録してください)');
   }
 
@@ -10014,6 +10349,10 @@
     // 保存先から復元する。従来はここで消去するだけで復元しなかったため、捺印表を読み取って
     // 表示された後にExcelを読み直すと、保存済みなのに画面から予定が消えていた。
     reloadStampStoreForCurrentProperty();
+    /* [2026-08-22追加 request storm 完全修正] 部屋一覧(FLOORS)が入れ替わったので、新しい部屋の
+       保存済み点検状態をここで読み直す。従来は1秒ポーリングが次のtickで勝手に拾っていたが、
+       ポーリングを廃止したため、物件が変わる経路から明示的に依頼する。 */
+    requestRemoteRefresh('property-change');
 
     initScheduleLabels();
     renderFilterChips();
@@ -12207,16 +12546,27 @@
     loadScheduleDays();
     loadEquipmentList();
     loadUploadedDocuments();
-    setInterval(loadAll, 1000);
+    /* [2026-08-22変更 request storm 完全修正] ここには setInterval(loadAll, 1000) があった。
+       利用者が何もしていない・データも変わっていない間も、部屋状態のまとめ取り2件を1秒ごとに
+       出し続けていた(実Safariで148件/約74秒として観測)。読み直しは「起動・他端末の更新通知・
+       オンライン復帰・画面復帰・物件切替・パネルを閉じたとき」だけに限定する。
+       詳細と根拠は requestRemoteRefresh() の上のコメントを参照。 */
+    installRemoteRefreshTriggers();
     checkScheduledReminders();
     setInterval(checkScheduledReminders, 60000);
     // 2026-07-20改善③: 初回起動時のみ、3ステップの操作ガイドを自動表示する。
     // (起動スプラッシュ#appSplashより手前のz-indexにしているため、スプラッシュが
     // フェードアウトした直後に自然に見える。)
     maybeShowOnboardingOnFirstLaunch();
-    sendPresenceHeartbeat();
-    setInterval(sendPresenceHeartbeat, 20000);
-    document.getElementById('inspectorName').addEventListener('change', sendPresenceHeartbeat);
+    /* [2026-08-22変更 request storm 完全修正] ここには setInterval(sendPresenceHeartbeat, 20000)
+       があった。端末を置いたまま何もしていない間も20秒ごとに kv_store への書き込みが出ていたため、
+       「操作したときだけ(最短20秒間隔で)送る」へ変更した。詳細は sendPresenceHeartbeat() の
+       上のコメントを参照。 */
+    sendPresenceHeartbeat({ force: true });
+    installPresenceActivityTriggers();
+    document.getElementById('inspectorName').addEventListener('change', function () {
+      sendPresenceHeartbeat({ force: true });
+    });
   }
 
   /* ============================================================

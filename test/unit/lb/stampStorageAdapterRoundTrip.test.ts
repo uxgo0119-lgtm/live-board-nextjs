@@ -149,10 +149,15 @@ function makeBrowser(idb: FakeIdb, remoteMode: RemoteMode): Sandbox {
   vm.runInContext([
     'PROPERTY_SCOPE_ENABLED', 'PROPERTY_SCOPED_KEY_PREFIXES', 'PROPERTY_SCOPED_EXACT_KEYS',
   ].map(extractVarDeclSource).join('\n'), sandbox);
+  // [2026-08-22追加 request storm対策] StampStoreの復元はまとめ取り(getMany → readRoomValuesBulk)
+  // を通るようになったため、その経路の実ソースも読み込む。この環境の window.storage は
+  // listValues を持たない(古いシム相当)ので、まとめ取りはローカルキャッシュへ倒れる。
+  // つまりこのテストは「リモートでまとめ取りできない状況でも往復できる」側を担保する。
   vm.runInContext([
     'isPropertyScopedKey', 'propertyScopedKey', 'propertyUnscopedKey',
     'isValidScopePropertyId', 'currentScopePropertyId', 'applyPropertyScope',
     'lcCacheKey', 'storageSet', 'storageGet', 'storageDelete', 'storageList', 'listKeysLocalFirst',
+    'storageListValues', 'readValueFromLocalCache', 'readRoomValuesBulk',
   ].map(extractFunctionSource).join('\n\n'), sandbox);
   vm.runInContext(extractStampStoreWiring(), sandbox);
   vm.runInContext('var __store = stampStore;', sandbox);

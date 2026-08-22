@@ -122,6 +122,8 @@ var SRC = [
   extractFunctionSource('escapeHtml'),
   extractFunctionSource('boTextToTableHtml'),
   extractFunctionSource('keyFor'),
+  extractVarDeclSource('BINDER_KEY_PREFIX'),
+  extractVarDeclSource('SCHEDULE_OVERRIDE_KEY_PREFIX'),
   extractFunctionSource('scheduleOverrideKeyFor'),
   extractFunctionSource('todayISODate'),
   extractFunctionSource('isoFromJpDate'),
@@ -141,7 +143,12 @@ var SRC = [
   extractFunctionSource('loadScheduleDays'),
   extractFunctionSource('loadEquipmentList'),
   extractFunctionSource('loadUploadedDocuments'),
+  // [2026-08-19] request storm対策で loadAll() は「再入ガード」と「本体(loadAllInner)」へ
+  // 分かれた。このテストが見ている挙動(物件切替時のメモリ整理・保存値からの復元・オフライン耐性)は
+  // 本体側にあるため、両方を読み込む。期待値は1つも変えていない。
+  extractVarDeclSource('loadAllInFlight'),
   extractFunctionSource('loadAll'),
+  extractFunctionSource('loadAllInner'),
 ].join('\n');
 
 var PROPERTY_ID = 'b6e18eed-f2f3-4674-812d-322732908616';
@@ -182,6 +189,16 @@ function makeContext(store) {
 
     // 保存レイヤー
     storageGet: function (key) { return store.get(key); },
+    /* [2026-08-19] loadAll()が全部屋分をまとめて取る経路。このテストの対象は「取得した後の
+       メモリ整理・復元」なので、取得手段そのものは既存のstorageGetフェイクと同じ動きの
+       スタブにしている(1件ずつ取れて、失敗した部屋はnull)。まとめ取り自体の正しさは
+       request storm専用テスト(request_storm_fix_verify.js)で機械確認している。 */
+    readRoomValuesBulk: function (rooms, keyForFn) {
+      return Promise.all(rooms.map(function (room) {
+        return store.get(keyForFn(room)).catch(function () { return null; });
+      }));
+    },
+    loadAllInFlight: false,
     storageDelete: function (key) { calls.storageDelete.push(key); return Promise.resolve(); },
     storageSet: function (key, v) { calls.storageSet.push(key); return Promise.resolve(); },
 
@@ -489,7 +506,8 @@ function testNoPersistedDeletes() {
   check('予定情報の初期化はメモリのみ(clearMemory)で、保存(clearPersisted)は消さない',
     clearDemoSrc.indexOf('clearMemory(') !== -1 && clearDemoSrc.indexOf('clearPersisted(') === -1);
   ['applyCurrentPropertyRecord', 'loadBuildingNotes', 'loadBoTables', 'loadProgressLog',
-    'loadSiteSupervisor', 'loadScheduleDays', 'loadEquipmentList', 'loadUploadedDocuments', 'loadAll'
+    'loadSiteSupervisor', 'loadScheduleDays', 'loadEquipmentList', 'loadUploadedDocuments', 'loadAll',
+    'loadAllInner'
   ].forEach(function (name) {
     check(name + '() が storageDelete を呼ばない', extractFunctionSource(name).indexOf('storageDelete(') === -1);
   });
