@@ -70,17 +70,66 @@ const INITIAL_PROPERTY_ID = 'b6e18eed-f2f3-4674-812d-322732908616'; // コスモ
     return typeof value === 'string' && value.length === 36 && UUID_V4_RE.test(value);
   }
 
+  /* [2026-08-18 Phase 1E-A1] 「今どの物件を選択しているか」の端末への永続化。
+
+     保存先は localStorage（IndexedDB / kv_store ではない）。業務データの保存先を決めるのに
+     propertyIdが要るため、そのpropertyId自身をpropertyIdでスコープされた場所へ置くと
+     循環依存になる。localStorageに置くこの1件は業務データではなく端末のUI設定であり、
+     property scope（isPropertyScopedKey）の対象外。業務データの正本は今まで通り
+     Supabaseの properties.id で、ここに新しい業務正本は作らない。 */
+  var CURRENT_PROPERTY_STORAGE_KEY = 'lb_current_property_id';
+
+  /* localStorageはSafariのプライベートモード・容量超過・セキュリティ設定で
+     読み書きの両方が例外を投げうる。その場合でもLive Board自体は起動しなければ
+     ならないため、失敗は握りつぶして「無かった」「保存できなかった」として扱う。
+     ここで別のpropertyIdへフォールバックすることは絶対にしない（推測での物件切替は
+     旧データ混入の原因になる）。 */
+  function readPersistedPropertyId() {
+    try {
+      return window.localStorage.getItem(CURRENT_PROPERTY_STORAGE_KEY);
+    } catch (e) {
+      return null;
+    }
+  }
+  function persistPropertyId(propertyId) {
+    try {
+      window.localStorage.setItem(CURRENT_PROPERTY_STORAGE_KEY, propertyId);
+      return true;
+    } catch (e) {
+      // 保存に失敗してもメモリ上の現在値は維持する（業務データは壊さない・再試行もしない）
+      return false;
+    }
+  }
+
   // currentPropertyId を変更してよい唯一の経路。null・空文字・UUID形式でない値は
   // 拒否し、その場合でも現在値は破壊しない（false を返すだけ）。
+  // [Phase 1E-A1] 有効な値を受け付けたときだけ端末へ保存する。不正値は保存もしない。
   function setCurrentPropertyId(propertyId) {
     if (!isValidPropertyId(propertyId)) return false;
     currentPropertyId = propertyId;
+    persistPropertyId(propertyId);
     return true;
   }
 
   window.getCurrentPropertyId = function () { return currentPropertyId; };
   window.setCurrentPropertyId = setCurrentPropertyId;
   window.isValidPropertyId = isValidPropertyId;
+
+  /* [2026-08-18 Phase 1E-A1] 起動時復元。
+     このIIFEは <head> 内の同期スクリプトとして、index.html本体（var PROPERTY の定義、
+     storageGet/storageSet、Realtime購読、ensureInspectionSession、写真パス、権限、招待）
+     より前に実行される。currentPropertyId が最初に読まれるより前に必ずここで確定させ、
+     以降この値を後から書き換えない。
+
+     端末に有効なUUIDが保存されていればそれを採用し、無い・空・不正なら何もしない
+     （＝INITIAL_PROPERTY_ID のまま起動する）。「不正だから別の物件にする」という
+     フォールバックは作らない。Phase 1E-A1は復元だけを担当し、物件一覧・物件切替UIは
+     まだ無いため、保存された値は利用者が明示的に選んだ物件だけである。 */
+  (function restorePersistedPropertyIdAtStartup() {
+    var saved = readPersistedPropertyId();
+    if (!isValidPropertyId(saved)) return;
+    setCurrentPropertyId(saved);
+  })();
 
   function initSupabaseIntegration() {
     sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);

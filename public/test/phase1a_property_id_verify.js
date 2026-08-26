@@ -139,11 +139,24 @@ console.log('\n==== E. 既存のSupabase処理が currentPropertyId を参照す
   required.forEach(function (pair) {
     check(pair[0] + ' が currentPropertyId を参照する', sbjs.indexOf(pair[1]) !== -1);
   });
-  // Phase 1Aでは物件切替を行わないため、setterを実際に呼ぶ経路はまだ存在しない
-  // （呼ばれない＝参照先property_idはPhase 1A前後で必ず同じ、の機械的な裏付け）。
-  check('Phase 1Aではsetterを呼び出す経路がまだ無い（保存先・読込先が変化しない裏付け）',
-    countOccurrences(sbjs, 'setCurrentPropertyId(') === 2, // 定義1 + window公開1
-    countOccurrences(sbjs, 'setCurrentPropertyId('));
+  // [2026-08-18 Phase 1E-A1で更新] Phase 1Aの時点ではsetterを呼ぶ経路が1つも無く、
+  // ここは `setCurrentPropertyId(` の出現数が2（定義1 + 経緯コメント1）であることを
+  // 見ていた。Phase 1E-A1で「起動時にlb_current_property_idから復元する」経路が
+  // 1つだけ追加されたため、期待値を「呼び出し経路0」から「呼び出し経路は起動時復元の
+  // 1箇所だけ」へ更新する。Phase 1Aが本当に守りたかった不変条件（currentPropertyIdへの
+  // 代入はsetter内の1回だけ／setterは1つだけ／index.htmlからは呼ばれない）は上下の
+  // 各checkでそのまま検査し続けている。
+  (function () {
+    function stripComments(src) {
+      return String(src).replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/\/\/[^\n]*/g, ' ');
+    }
+    var codeOnly = stripComments(sbjs);
+    check('setterを呼び出す経路は「定義」＋「起動時復元」の1箇所だけ（物件切替UIはまだ無い）',
+      countOccurrences(codeOnly, 'setCurrentPropertyId(') === 2, // 定義1 + 起動時復元の呼び出し1
+      countOccurrences(codeOnly, 'setCurrentPropertyId('));
+    check('その唯一の呼び出しは起動時復元（restorePersistedPropertyIdAtStartup）の中にある',
+      /function restorePersistedPropertyIdAtStartup\(\)\s*\{[^}]*setCurrentPropertyId\(saved\);/.test(codeOnly));
+  })();
 })();
 
 console.log('\n==== B. PROPERTY.propertyId の追加 (index.html) ====');
