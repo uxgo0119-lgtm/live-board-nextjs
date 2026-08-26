@@ -406,3 +406,44 @@ Git未追跡ファイルで削除が不可逆のため、**無人実行では消
 
 同ディレクトリの `task_sample_inline.md` / `task_sample_written.md` / `taskTemplateGuard.sh` は
 無人実行ランナー用のもので、trace とは無関係。置き場所が紛らわしいだけで動作への影響は無い。
+
+---
+
+## 12. 6回目の実行（2026-08-16 19:13）— 再現確認のみ。コード変更なし
+
+同じタスクでの6回目の無人実行。**完了条件は4回目までに達成済み**のため、絶対ルール10
+（完了条件を満たしたら一度止める／1機能を無限に磨き続けない）と、今回のタスクの
+「複雑にしない・新しい仕組みを増やさない」に従い、**コードは1行も変更していない**。
+
+### 再現確認（前回と完全一致）
+
+| 検証 | 結果 |
+| --- | --- |
+| 一括検証本体（`npx tsx test/batch/runBatchValidation.ts`） | **PASS**（OCR_FAIL=0 / NORMALIZE_FAIL=0 / PERSIST_FAIL=0 / RENDER_FAIL=0） |
+| `npm run test:unit` | PASS（batchValidation / batchValidationSelfCheck を含む全テスト） |
+| `npm run test:release` | PASS（30/30 まで到達） |
+| `npm run typecheck` | PASS |
+| `npm run build` | PASS（Compiled successfully） |
+
+判定内訳も前回と同一（MASTER室数=66 / OCR対象室数(raw)=65 / Canonical=65 / 復元=65 /
+描画カード=66 / 要確認=3 / 取りこぼし=0 / 未割当の時間指定行=1 / Ground Truth室数=65 /
+判定項目数=390）。登録ケースは引き続き1件。
+
+### §11 の残課題のうち1つが解消済み
+
+`test/trace/stamp801Trace.ts` / `stamp801Repro.ts`（801号室のハードコードを持つ使い捨て調査
+スクリプト）は**既に削除されている**ことを確認した（現在 `test/trace/` に残るのは無人実行
+ランナー用の3ファイルのみ）。よってこの項目のPC作業は不要。
+
+### 実データ・複雑度の再確認
+
+- `raw_checkboxes` を持つ実OCR生JSONはリポジトリ全体で `real_scan_prop13_20260814.json` の
+  1件のみで変化なし。架空データは追加していない。
+- 新しい正本・Canonical・StampStore・保存経路・adapter・override・物件別ルール: **追加0**（累計）。
+- `test/batch/` は `lbSandbox.ts` と `runBatchValidation.ts` の2ファイルのまま。
+- CI設定（`.github/workflows`）はリポジトリに存在しないため、ケースJSONが `.gitignore` 対象
+  （実物件の読み取り結果を含むため意図的）であることによる他環境での影響は現時点で無い。
+
+### 残っているのは1つだけ
+
+実Live Board（ブラウザ）での目視確認（§9末尾）。これだけは人にしかできない。
