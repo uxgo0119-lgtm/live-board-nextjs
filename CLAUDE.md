@@ -1,3 +1,5 @@
+@LESSONS.md
+
 # CLAUDE.md
 
 ## 最優先：FireFlow 開発 絶対ルール
